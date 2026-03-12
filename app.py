@@ -7,20 +7,20 @@ from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. CONFIG & AUTHENTICATION (FIXED) ---
-st.set_page_config(page_title="S26 War-Room: Global Command", layout="wide")
+# --- 1. CONFIG & AUTHENTICATION ---
+st.set_page_config(page_title="S26 War-Room: Command Center", layout="wide")
 
 IST = pytz.timezone('Asia/Kolkata')
 analyzer = SentimentIntensityAnalyzer()
 
-# Accessing secrets using generic keys defined in your setup
+# FIXED: Standardized key mapping to prevent 401 errors
 try:
     REDDIT_AUTH = {
         "client_id": st.secrets["reddit"]["client_id"],
         "client_secret": st.secrets["reddit"]["client_secret"],
         "user_agent": st.secrets["reddit"]["user_agent"],
-        "username": st.secrets["reddit"]["username"], # Refers to nitinsharma1518
-        "password": st.secrets["reddit"]["password"]  # Refers to $Fireblade-1000
+        "username": st.secrets["reddit"]["username"], # Standard key
+        "password": st.secrets["reddit"]["password"]  # Standard key
     }
     YOUTUBE_API_KEY = st.secrets["youtube"]["api_key"]
 except Exception as e:
@@ -41,10 +41,10 @@ class S26IntelligenceEngine:
     def fetch_deep_reddit(self, query):
         data = []
         try:
-            # Search for relevant launch threads
+            # Search for relevant threads
             submissions = self.reddit.subreddit("all").search(query, limit=5, sort="relevance")
             for sub in submissions:
-                # Replace MoreComments to get the full conversation tree
+                # Crawl comments deep into the thread
                 sub.comments.replace_more(limit=0) 
                 for comment in sub.comments.list()[:50]:
                     score = analyzer.polarity_scores(comment.body)['compound']
@@ -62,10 +62,11 @@ class S26IntelligenceEngine:
             st.sidebar.warning(f"Reddit Sync Error: {e}")
         return pd.DataFrame(data)
 
-# --- 3. UI/UX DASHBOARD ---
+# --- 3. THE MANAGEMENT DASHBOARD ---
 st.title("🛡️ S26 Global Launch Command Center")
-st.caption(f"Authenticated Feed | IST: {datetime.now(IST).strftime('%I:%M %p')} | Auto-refresh: 5m")
+st.caption(f"Authenticated Feed | IST: {datetime.now(IST).strftime('%I:%M %p')} | Refresh: 5m")
 
+# Live Refresh Every 5 Minutes
 st_autorefresh(interval=5 * 60 * 1000, key="global_refresh")
 
 with st.sidebar:
@@ -88,13 +89,17 @@ if not df.empty:
     k2.metric("Critical Alerts", len(filtered_df[filtered_df['Signal'] == "CRITICAL"]))
     k3.metric("Insights Scanned", len(df))
 
-    tab1, tab2 = st.tabs(["📊 Analytics", "🔍 Comment Deep-Dive"])
+    tab1, tab2 = st.tabs(["📊 Analytics Heatmap", "🔍 Comment Deep-Dive"])
     
     with tab1:
         st.subheader("Source Sentiment Benchmarking")
-        st.bar_chart(df.groupby('Source')['Sentiment'].mean())
+        if not df.empty:
+            st.bar_chart(df.groupby('Source')['Sentiment'].mean())
+        else:
+            st.info("Awaiting source data...")
 
     with tab2:
+        st.subheader("Interactive Comment Explorer")
         st.dataframe(
             filtered_df[['Icon', 'Signal', 'Source', 'Verbatim', 'Sentiment', 'IST_Time']],
             column_config={
@@ -104,7 +109,8 @@ if not df.empty:
             use_container_width=True, hide_index=True
         )
         
+        # Download Report
         csv = filtered_df.to_csv(index=False).encode('utf-8')
         st.download_button("📩 Download PDF/CSV Report", csv, "S26_WarRoom_Report.csv", "text/csv")
 else:
-    st.warning("No data found. Check your authentication keys.")
+    st.warning("No data found. Ensure your Reddit Username/Password are correctly set in Secrets.")
