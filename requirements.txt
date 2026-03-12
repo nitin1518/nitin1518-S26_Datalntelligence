@@ -1,4 +1,7 @@
-streamlit==1.32.0
-boto3==1.34.64
-pandas==2.2.1
-plotly==5.19.0
+streamlit
+pandas
+praw
+google-api-python-client
+vaderSentiment
+pytz
+streamlit-autorefresh
