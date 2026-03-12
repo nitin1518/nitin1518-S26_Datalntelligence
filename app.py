@@ -18,15 +18,15 @@ analyzer = SentimentIntensityAnalyzer()
 # Replace placeholder username/password with your actual Reddit credentials
 try:
     REDDIT_AUTH = {
-        "client_id": "vfIIeskF_WCfwIWI txERZw",
-        "client_secret": "PFIKG433lRLacPFxMVnzsLHoiMAGzA",
-        "user_agent": "Product_Launch_Analyzer_v1",
-        "username": st.secrets["reddit"]["nitinsharma1518"], 
-        "password": st.secrets["reddit"]["$Fireblade-1000"]  
+        "client_id": st.secrets["reddit"]["client_id"],
+        "client_secret": st.secrets["reddit"]["client_secret"],
+        "user_agent": st.secrets["reddit"]["user_agent"],
+        "username": st.secrets["reddit"]["username"], # Standard key
+        "password": st.secrets["reddit"]["password"]  # Standard key
     }
-    YOUTUBE_API_KEY = "AIzaSyAK6Pg1mAjzEFKo0mgP0aERywPfTpQB9rs"
-except Exception:
-    st.error("⚠️ Setup Missing: Add your Reddit Username/Password to .streamlit/secrets.toml")
+    YOUTUBE_API_KEY = st.secrets["youtube"]["api_key"]
+except Exception as e:
+    st.error(f"⚠️ Configuration Error: {e}")
     st.stop()
 
 # --- 2. THE MULTI-SOURCE ENGINE ---
