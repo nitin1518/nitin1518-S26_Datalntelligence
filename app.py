@@ -21,8 +21,8 @@ try:
         "client_id": st.secrets["reddit"]["client_id"],
         "client_secret": st.secrets["reddit"]["client_secret"],
         "user_agent": st.secrets["reddit"]["user_agent"],
-        "username": st.secrets["reddit"]["username"], # Standard key
-        "password": st.secrets["reddit"]["password"]  # Standard key
+        "username": st.secrets["reddit"]["username"], # Use the generic key name
+        "password": st.secrets["reddit"]["password"]  # Use the generic key name
     }
     YOUTUBE_API_KEY = st.secrets["youtube"]["api_key"]
 except Exception as e:
