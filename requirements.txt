@@ -1,8 +1,7 @@
+google-generativeai>=0.8.0
 streamlit
 pandas
-google-api-python-client
+plotly
 vaderSentiment
 pytz
 streamlit-autorefresh
-google-genai>=0.3.0
-plotly
