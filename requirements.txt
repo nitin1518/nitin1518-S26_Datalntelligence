@@ -2,6 +2,8 @@ google-genai>=0.3.0
 streamlit
 pandas
 plotly
+vaderSentiment
+pytz
+streamlit-autorefresh
 yfinance
 feedparser
-streamlit-autorefresh
