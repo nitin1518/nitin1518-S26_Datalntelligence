@@ -1,16 +1,19 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 import pytz, json, os
 from datetime import datetime
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIG & WAR-ROOM THEME ---
 st.set_page_config(page_title="S26 Launch: Global Command", layout="wide", initial_sidebar_state="collapsed")
 IST = pytz.timezone('Asia/Kolkata')
 DATA_VAULT = "s26_market_vault"
+analyzer = SentimentIntensityAnalyzer() # Used for the fallback engine
 
 if not os.path.exists(DATA_VAULT):
     os.makedirs(DATA_VAULT)
@@ -27,17 +30,16 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. SECRETS & AUTH (FIXED MODEL NAME) ---
+# --- 2. SECRETS & AUTH (NEW SDK) ---
 try:
-    genai.configure(api_key=st.secrets["gemini"]["api_key"])
-    # FIXED: Upgraded to Gemini 3 Flash with JSON enforcement
-    model = genai.GenerativeModel('gemini-3-flash', generation_config={"response_mime_type": "application/json"})
+    # New SDK initialization
+    client = genai.Client(api_key=st.secrets["gemini"]["api_key"])
     yt_service = build('youtube', 'v3', developerKey=st.secrets["youtube"]["api_key"])
 except Exception:
     st.error("⚠️ System Offline: Verify API Keys.")
     st.stop()
 
-# --- 3. THE SENSING ENGINE ---
+# --- 3. THE SENSING ENGINE (WITH FAILSAFE) ---
 class MarketSensor:
     def fetch_raw_data(self, query, max_results=50):
         raw_comments = []
@@ -47,8 +49,30 @@ class MarketSensor:
                 comm_res = yt_service.commentThreads().list(part='snippet', videoId=vid['id']['videoId'], maxResults=max_results).execute()
                 for item in comm_res['items']:
                     raw_comments.append(item['snippet']['topLevelComment']['snippet']['textOriginal'])
-        except Exception as e: st.warning(f"Fetch limited: {e}")
+        except Exception as e: st.warning(f"YouTube Fetch limited: {e}")
         return raw_comments
+
+    def fallback_processor(self, comments):
+        """If AI fails, this keeps the charts alive using rules & VADER."""
+        data = []
+        for c in comments:
+            score = analyzer.polarity_scores(c)['compound']
+            cl = c.lower()
+            
+            # Basic keyword routing
+            cat = "Generic"
+            if any(w in cl for w in ["camera", "photo", "lens"]): cat = "Camera"
+            elif any(w in cl for w in ["battery", "heat", "drain", "garam"]): cat = "Battery"
+            elif any(w in cl for w in ["screen", "display", "color"]): cat = "Display"
+            elif any(w in cl for w in ["price", "cost", "expensive"]): cat = "Price"
+            
+            data.append({
+                "category": cat,
+                "sentiment": score,
+                "root_cause": "AI Offline (Rule-based Fallback)",
+                "is_urgent": False
+            })
+        return pd.DataFrame(data)
 
     def process_with_llm(self, comments):
         prompt = f"""
@@ -62,13 +86,22 @@ class MarketSensor:
         Comments: {json.dumps(comments)}
         """
         try:
-            response = model.generate_content(prompt)
+            # Using the NEW SDK generation syntax and stable 2.0 Flash model
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
             df = pd.DataFrame(json.loads(response.text))
             df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
             return df
         except Exception as e:
-            st.error(f"AI Parse Error: {e}")
-            return pd.DataFrame()
+            st.toast(f"AI Engine Offline. Engaging VADER Fallback. Error: {e}", icon="⚠️")
+            df = self.fallback_processor(comments)
+            df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
+            return df
 
 def load_historical_data():
     files = [f for f in os.listdir(DATA_VAULT) if f.endswith('.csv')]
@@ -76,7 +109,6 @@ def load_historical_data():
     return pd.concat([pd.read_csv(os.path.join(DATA_VAULT, f)) for f in files], ignore_index=True)
 
 # --- 4. AUTO-PRESENTATION CYCLE ---
-# Refreshes the app every 30 seconds to toggle views for the floor display
 cycle_count = st_autorefresh(interval=30000, key="floor_display_cycle")
 
 st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;'>🛡️ S26 COMMAND: VOC TIME-MACHINE</h2>", unsafe_allow_html=True)
@@ -84,7 +116,7 @@ st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;
 with st.sidebar:
     st.header("⚙️ Pipeline Controls")
     if st.button("🔄 TRIGGER LIVE SYNC", use_container_width=True):
-        with st.spinner("AI ingesting market signals..."):
+        with st.spinner("Ingesting market signals..."):
             sensor = MarketSensor()
             raw = sensor.fetch_raw_data("Samsung S26 Ultra review India")
             new_df = sensor.process_with_llm(raw)
@@ -92,7 +124,6 @@ with st.sidebar:
                 new_df['Raw_Comment'] = raw[:len(new_df)]
                 new_df.to_csv(f"{DATA_VAULT}/sync_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv", index=False)
                 st.success("Network Sync Complete.")
-    st.caption("Auto-loads historical vault on refresh.")
 
 master_df = load_historical_data()
 
@@ -125,7 +156,6 @@ if not master_df.empty:
     st.write("---")
 
     # --- ROW 2: AUTO-CYCLING VIEWS ---
-    # Alternates views every 30 seconds for the big screen
     if cycle_count % 2 == 0:
         st.subheader("📡 The Threat Matrix: Aspect vs. Sentiment")
         matrix_df = current_df.groupby('category').agg(Avg_Sentiment=('sentiment', 'mean'), Mentions=('category', 'count')).reset_index()
