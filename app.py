@@ -5,13 +5,14 @@ import yfinance as yf
 import feedparser
 from google import genai
 from google.genai import types
-import pytz, json
+import pytz, json, os
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIG & UI ---
 st.set_page_config(page_title="Global Threat Matrix", layout="wide", initial_sidebar_state="collapsed")
 IST = pytz.timezone('Asia/Kolkata')
+VAULT_FILE = "geo_threat_history.csv"
 
 st.markdown("""
     <style>
@@ -33,54 +34,81 @@ except Exception:
 # --- 3. DATA ENGINES ---
 class GeoIntelligence:
     def fetch_live_markets(self):
-        """Pulls live financial impact data."""
-        tickers = {"Crude Oil": "BZ=F", "Gold": "GC=F", "S&P 500": "^GSPC"}
+        tickers = {"Crude Oil": "BZ=F", "Gold": "GC=F"}
         market_data = {}
         for name, ticker in tickers.items():
             try:
-                data = yf.Ticker(ticker).history(period="2d")
+                data = yf.Ticker(ticker).history(period="5d")
                 if len(data) >= 2:
                     current = data['Close'].iloc[-1]
                     prev = data['Close'].iloc[-2]
                     pct_change = ((current - prev) / prev) * 100
                     market_data[name] = {"price": current, "change": pct_change}
-            except: pass
+            except Exception as e:
+                st.sidebar.warning(f"Market fetch issue for {name}: {e}")
         return market_data
 
     def fetch_global_news(self):
-        """Bypasses blocks using Google News RSS to get latest headlines."""
         url = "https://news.google.com/rss/search?q=Israel+Iran+US+conflict&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(url)
-        articles = []
-        for entry in feed.entries[:15]: # Get top 15 latest
-            articles.append({"Title": entry.title, "Published": entry.published, "Link": entry.link})
-        return articles
+        try:
+            feed = feedparser.parse(url)
+            articles = []
+            for entry in feed.entries[:15]:
+                articles.append({"Title": entry.title, "Published": entry.published, "Link": entry.link})
+            return articles
+        except Exception as e:
+            st.error(f"RSS Fetch Error: {e}")
+            return []
 
     def analyze_geopolitics(self, headlines):
-        """Uses Gemini to assess escalation and extract involved actors."""
         text_feed = " | ".join([h['Title'] for h in headlines])
         prompt = f"""
         Analyze these live news headlines regarding the Middle East conflict.
-        Return a strict JSON object with:
+        Return a strict JSON object with NO markdown formatting, NO backticks. Only the raw JSON.
         - "escalation_index": Float from 1.0 (Peace talks) to 10.0 (Active regional war).
-        - "narrative_momentum": Which entity has the current strategic/media momentum based on headlines? (e.g., "US/Israel", "Iran/Proxies", "Stalemate").
-        - "involved_nations": A list of other countries/groups mentioned (e.g., ["Lebanon", "Yemen", "Russia"]).
-        - "executive_summary": A 2-sentence tactical summary of the current situation.
+        - "narrative_momentum": Which entity has the current strategic/media momentum? (e.g., "US/Israel", "Iran/Proxies", "Stalemate").
+        - "involved_nations": A list of other countries/groups mentioned (e.g., ["Lebanon", "Yemen"]).
+        - "executive_summary": A 2-sentence tactical summary of the situation.
         
         Headlines: {text_feed}
         """
         try:
+            # CRITICAL FIX: Lowering safety settings for war/geopolitics analysis
             response = client.models.generate_content(
                 model='gemini-2.0-flash',
                 contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                    ]
+                )
             )
-            return json.loads(response.text)
+            # CRITICAL FIX: Strip markdown blockticks in case the AI ignores the mime_type instruction
+            clean_json = response.text.replace('```json', '').replace('```', '').strip()
+            return json.loads(clean_json)
         except Exception as e:
+            st.error(f"AI Processing Failed. Reason: {e}")
             return None
 
+def save_to_vault(escalation_score, momentum):
+    """Saves the score to build the historical trendline."""
+    new_data = pd.DataFrame([{
+        "Time": datetime.now(IST).strftime('%Y-%m-%d %H:%M'),
+        "Escalation_Index": escalation_score,
+        "Momentum": momentum
+    }])
+    if os.path.exists(VAULT_FILE):
+        df = pd.read_csv(VAULT_FILE)
+        df = pd.concat([df, new_data], ignore_index=True)
+    else:
+        df = new_data
+    df.to_csv(VAULT_FILE, index=False)
+    return df
+
 # --- 4. DASHBOARD EXECUTION ---
-# Keeps the dashboard ALIVE, refreshing every 5 minutes
 st_autorefresh(interval=5 * 60 * 1000, key="geo_refresh")
 
 st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;'>🌐 GLOBAL THREAT MATRIX: LIVE</h2>", unsafe_allow_html=True)
@@ -88,53 +116,62 @@ st.markdown(f"<p style='text-align: center; color: #8b949e;'>LAST SYNC: {datetim
 
 engine = GeoIntelligence()
 
-with st.spinner("Aggregating global intelligence networks..."):
+with st.spinner("Aggregating global intelligence networks and parsing threat levels..."):
     markets = engine.fetch_live_markets()
     news = engine.fetch_global_news()
-    analysis = engine.analyze_geopolitics(news)
+    if news:
+        analysis = engine.analyze_geopolitics(news)
+    else:
+        analysis = None
 
 if analysis and news:
-    # --- LEVEL 1: MACRO IMPACT (MARKETS & ESCALATION) ---
+    # Save current state to historical vault
+    history_df = save_to_vault(analysis['escalation_index'], analysis['narrative_momentum'])
+
+    # --- LEVEL 1: MACRO IMPACT ---
     c1, c2, c3, c4 = st.columns(4)
     
-    # Escalation Index
     e_color = "#ff7b72" if analysis['escalation_index'] > 6 else "#d29922"
     c1.markdown(f"<div class='metric-box'><div class='metric-title'>Escalation Index (1-10)</div><div class='metric-value' style='color: {e_color};'>{analysis['escalation_index']}</div></div>", unsafe_allow_html=True)
+    c2.markdown(f"<div class='metric-box'><div class='metric-title'>Strategic Momentum</div><div class='metric-value'>{analysis['narrative_momentum']}</div></div>", unsafe_allow_html=True)
     
-    # Narrative Momentum
-    c2.markdown(f"<div class='metric-box'><div class='metric-title'>Media/Strategic Momentum</div><div class='metric-value'>{analysis['narrative_momentum']}</div></div>", unsafe_allow_html=True)
-    
-    # Markets
     if "Crude Oil" in markets:
         oil = markets["Crude Oil"]
-        o_color = "#ff7b72" if oil['change'] > 0 else "#3fb950" # Oil going up usually means conflict risk
+        o_color = "#ff7b72" if oil['change'] > 0 else "#3fb950" 
         c3.markdown(f"<div class='metric-box'><div class='metric-title'>Brent Crude Oil</div><div class='metric-value'>${oil['price']:.2f} <span style='font-size: 1rem; color:{o_color};'>{oil['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
+    else: c3.info("Oil market data offline.")
     
     if "Gold" in markets:
         gold = markets["Gold"]
         g_color = "#ff7b72" if gold['change'] > 0 else "#3fb950"
         c4.markdown(f"<div class='metric-box'><div class='metric-title'>Gold (Safe Haven)</div><div class='metric-value'>${gold['price']:.2f} <span style='font-size: 1rem; color:{g_color};'>{gold['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
+    else: c4.info("Gold market data offline.")
 
     st.write("---")
 
-    # --- LEVEL 2: AI TACTICAL BRIEFING ---
+    # --- LEVEL 2: TACTICAL TRENDS & BRIEFING ---
     colA, colB = st.columns([2, 1])
     
     with colA:
+        st.subheader("📈 Escalation Trendline (Historical Risk)")
+        if not history_df.empty and len(history_df) > 1:
+            fig = px.line(history_df, x="Time", y="Escalation_Index", markers=True, template="plotly_dark")
+            fig.update_layout(yaxis_range=[1, 10], yaxis_title="Threat Level (1-10)")
+            fig.add_hline(y=7.0, line_dash="dash", line_color="red", annotation_text="Critical Danger Zone")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Awaiting next sync cycle to draw historical trendline...")
+
         st.subheader("🤖 AI Strategic Summary")
         st.info(analysis['executive_summary'])
         
-        st.subheader("🌍 Secondary Actors Engaged")
-        # Visualizing the extracted nations
         if analysis['involved_nations']:
-            nations_df = pd.DataFrame({"Nation/Group": analysis['involved_nations'], "Status": "Active in News Cycle"})
-            st.dataframe(nations_df, use_container_width=True, hide_index=True)
-        else:
-            st.write("No major secondary actors dominating the current cycle.")
+            st.write("**Secondary Actors Pulled Into Conflict:**")
+            st.write(", ".join(analysis['involved_nations']))
 
     with colB:
         st.subheader("📡 Live Global Intel Feed")
-        for article in news[:7]: # Show top 7
+        for article in news[:7]:
             st.markdown(f"""
             <div class='news-card'>
                 <a href='{article["Link"]}' target='_blank' style='color: #58a6ff; text-decoration: none; font-weight: bold;'>{article["Title"]}</a><br>
@@ -143,4 +180,4 @@ if analysis and news:
             """, unsafe_allow_html=True)
 
 else:
-    st.error("Data aggregation failed. Retrying on next sync cycle.")
+    st.warning("Dashboard encountered an error. Check the red error messages above to debug.")
