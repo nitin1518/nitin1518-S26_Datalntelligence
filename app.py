@@ -1,117 +1,120 @@
 import streamlit as st
 import pandas as pd
-import praw
 from googleapiclient.discovery import build
 import pytz
+import os
 from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
 
-
-# --- 1. CONFIG & AUTHENTICATION ---
-st.set_page_config(page_title="S26 War-Room: Command Center", layout="wide")
-
+# --- 1. SETTINGS & THEME ---
+st.set_page_config(page_title="S26 Launch Command", layout="wide")
 IST = pytz.timezone('Asia/Kolkata')
 analyzer = SentimentIntensityAnalyzer()
 
-# FIXED: Standardized key mapping to prevent 401 errors
+# Folder for Local Data Backups
+CACHE_DIR = "launch_data_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+# --- 2. AUTHENTICATION ---
 try:
-    REDDIT_AUTH = {
-        "client_id": st.secrets["reddit"]["client_id"],
-        "client_secret": st.secrets["reddit"]["client_secret"],
-        "user_agent": st.secrets["reddit"]["user_agent"],
-        "username": st.secrets["reddit"]["username"], # Standard key
-        "password": st.secrets["reddit"]["password"]  # Standard key
-    }
-    YOUTUBE_API_KEY = st.secrets["youtube"]["api_key"]
+    YT_KEY = st.secrets["youtube"]["api_key"]
+    yt_service = build('youtube', 'v3', developerKey=YT_KEY)
 except Exception as e:
-    st.error(f"⚠️ Configuration Error: {e}. Check your Streamlit Secrets.")
+    st.error("⚠️ YouTube API Key Missing in Secrets.")
     st.stop()
 
-# --- 2. THE MAX-DATA ENGINE ---
-class S26IntelligenceEngine:
-    def __init__(self):
-        self.reddit = praw.Reddit(**REDDIT_AUTH)
-        self.yt = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-
-    def get_signal(self, score):
-        if score < -0.35: return "CRITICAL", "🔴"
-        if score < -0.05: return "WARNING", "🟠"
-        return "STABLE", "🟢"
-
-    def fetch_deep_reddit(self, query):
-        data = []
+# --- 3. DATA ENGINE ---
+class S26Intelligence:
+    def fetch_yt_comments(self, query="S26 Ultra India"):
+        all_data = []
         try:
-            # Search for relevant threads
-            submissions = self.reddit.subreddit("all").search(query, limit=5, sort="relevance")
-            for sub in submissions:
-                # Crawl comments deep into the thread
-                sub.comments.replace_more(limit=0) 
-                for comment in sub.comments.list()[:50]:
-                    score = analyzer.polarity_scores(comment.body)['compound']
-                    label, icon = self.get_signal(score)
-                    data.append({
-                        "Source": f"r/{sub.subreddit.display_name}",
-                        "Topic": sub.title,
-                        "Verbatim": comment.body,
+            # Step A: Find the most relevant videos
+            search_res = yt_service.search().list(q=query, part='id,snippet', maxResults=3, type='video').execute()
+            
+            for vid in search_res['items']:
+                v_id = vid['id']['videoId']
+                v_title = vid['snippet']['title']
+                
+                # Step B: Get top comments for each video
+                comm_res = yt_service.commentThreads().list(
+                    part='snippet', videoId=v_id, maxResults=50, order='relevance'
+                ).execute()
+                
+                for item in comm_res['items']:
+                    text = item['snippet']['topLevelComment']['snippet']['textDisplay']
+                    score = analyzer.polarity_scores(text)['compound']
+                    
+                    all_data.append({
+                        "Source": "YouTube",
+                        "Video_Title": v_title,
+                        "Comment": text,
                         "Sentiment": score,
-                        "Signal": label,
-                        "Icon": icon,
-                        "IST_Time": datetime.fromtimestamp(comment.created_utc, IST).strftime('%I:%M %p')
+                        "Signal": "CRITICAL" if score < -0.35 else ("WARNING" if score < -0.05 else "STABLE"),
+                        "Timestamp": datetime.now(IST).strftime('%Y-%m-%d %H:%M')
                     })
-        except Exception as e: 
-            st.sidebar.warning(f"Reddit Sync Error: {e}")
-        return pd.DataFrame(data)
+            return pd.DataFrame(all_data)
+        except Exception as e:
+            st.error(f"YouTube API Error: {e}")
+            return pd.DataFrame()
 
-# --- 3. THE MANAGEMENT DASHBOARD ---
-st.title("🛡️ S26 Global Launch Command Center")
-st.caption(f"Authenticated Feed | IST: {datetime.now(IST).strftime('%I:%M %p')} | Refresh: 5m")
-
-# Live Refresh Every 5 Minutes
-st_autorefresh(interval=5 * 60 * 1000, key="global_refresh")
-
+# --- 4. SIDEBAR & CACHE CONTROLS ---
 with st.sidebar:
-    st.header("🎛️ Command Controls")
-    search_query = st.text_input("Product Query", value="S26 Ultra India")
-    signal_filter = st.multiselect("Active Signals", ["CRITICAL", "WARNING", "STABLE"], default=["CRITICAL", "WARNING"])
-    min_sent = st.slider("Sentiment Intensity Filter", -1.0, 1.0, -1.0)
-
-engine = S26IntelligenceEngine()
-
-with st.spinner('Tunneling into global threads for maximum insights...'):
-    df = engine.fetch_deep_reddit(search_query)
-
-if not df.empty:
-    filtered_df = df[(df['Signal'].isin(signal_filter)) & (df['Sentiment'] >= min_sent)]
+    st.header("📦 Data Control Center")
+    data_mode = st.radio("Select Data Source", ["Live API Scrape", "Load Local Cache"])
     
-    # Executive KPIs
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Overall Pulse", f"{df['Sentiment'].mean():.2f}")
-    k2.metric("Critical Alerts", len(filtered_df[filtered_df['Signal'] == "CRITICAL"]))
-    k3.metric("Insights Scanned", len(df))
+    if data_mode == "Live API Scrape":
+        if st.button("🚀 Trigger Launch Sync"):
+            engine = S26Intelligence()
+            new_df = engine.fetch_yt_comments()
+            if not new_df.empty:
+                st.session_state['active_data'] = new_df
+                # Save to local file
+                fname = f"{CACHE_DIR}/S26_Sync_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+                new_df.to_csv(fname, index=False)
+                st.success(f"Sync Complete. Backup saved.")
 
-    tab1, tab2 = st.tabs(["📊 Analytics Heatmap", "🔍 Comment Deep-Dive"])
+    else:
+        # Load most recent file from cache
+        files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.csv')]
+        if files:
+            selected_file = st.selectbox("Select Historical Snapshot", sorted(files, reverse=True))
+            if st.button("📂 Load Selected Snapshot"):
+                st.session_state['active_data'] = pd.read_csv(os.path.join(CACHE_DIR, selected_file))
+        else:
+            st.warning("No local cache found. Please run a Live Scrape first.")
+
+# --- 5. THE EXECUTIVE DASHBOARD ---
+st.title("🛡️ S26 Launch War-Room: Global Sentiment")
+st.caption(f"Status: {data_mode} | Local IST: {datetime.now(IST).strftime('%I:%M %p')}")
+
+if 'active_data' in st.session_state:
+    df = st.session_state['active_data']
+    
+    # 1. Metric Row
+    m1, m2, m3 = st.columns(3)
+    avg_s = df['Sentiment'].mean()
+    m1.metric("Overall Pulse", f"{avg_s:.2f}", delta="Actionable" if avg_s < 0 else "Stable")
+    m2.metric("Critical Alerts", len(df[df['Signal'] == "CRITICAL"]))
+    m3.metric("Verified Voices", len(df))
+
+    # 2. Charts
+    tab1, tab2 = st.tabs(["📊 Sentiment Distribution", "🔍 Comment Deep-Dive"])
     
     with tab1:
-        st.subheader("Source Sentiment Benchmarking")
-        if not df.empty:
-            st.bar_chart(df.groupby('Source')['Sentiment'].mean())
-        else:
-            st.info("Awaiting source data...")
+        st.subheader("Crisis Heatmap by Video Source")
+        st.bar_chart(df.groupby('Video_Title')['Sentiment'].mean())
 
     with tab2:
-        st.subheader("Interactive Comment Explorer")
+        # Professional Data Grid
         st.dataframe(
-            filtered_df[['Icon', 'Signal', 'Source', 'Verbatim', 'Sentiment', 'IST_Time']],
+            df[['Signal', 'Video_Title', 'Comment', 'Sentiment', 'Timestamp']],
             column_config={
-                "Verbatim": st.column_config.TextColumn("Customer Comment", width="large"),
-                "Sentiment": st.column_config.ProgressColumn("Sentiment Intensity", min_value=-1, max_value=1),
+                "Comment": st.column_config.TextColumn("Customer Verbatim", width="large"),
+                "Sentiment": st.column_config.ProgressColumn("Intensity", min_value=-1, max_value=1),
             },
             use_container_width=True, hide_index=True
         )
-        
-        # Download Report
-        csv = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📩 Download PDF/CSV Report", csv, "S26_WarRoom_Report.csv", "text/csv")
 else:
-    st.warning("No data found. Ensure your Reddit Username/Password are correctly set in Secrets.")
+    st.info("👋 Dashboard Ready. Use the sidebar to trigger a sync or load cached data.")
