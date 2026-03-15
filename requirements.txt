@@ -4,3 +4,5 @@ google-api-python-client
 vaderSentiment
 pytz
 streamlit-autorefresh
+google-generativeai
+plotly
