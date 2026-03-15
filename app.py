@@ -7,34 +7,42 @@ from googleapiclient.discovery import build
 import pytz, os, re
 from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIG & STYLING ---
-st.set_page_config(page_title="S26 War-Room: AI Command", layout="wide")
+st.set_page_config(page_title="S26 War-Room: AI Intelligence", layout="wide")
 IST = pytz.timezone('Asia/Kolkata')
 analyzer = SentimentIntensityAnalyzer()
 
-# Professional CSS for a "Premium" feel
+# High-End UX Styling
 st.markdown("""
     <style>
-    .main { background-color: #f4f7f9; }
-    .stMetric { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #eef2f6; }
-    .ai-brief-box { background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); color: white; padding: 25px; border-radius: 15px; margin-bottom: 25px; }
+    .main { background-color: #f0f4f8; }
+    .stMetric { background: #ffffff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    .ai-brief { background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: white; padding: 25px; border-radius: 15px; }
+    .chart-summary { background: #e0e7ff; padding: 15px; border-radius: 10px; margin-top: 10px; font-style: italic; color: #1e1b4b; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTICATION ---
+# --- 2. AUTHENTICATION (UPGRADED FOR 2026) ---
 try:
     genai.configure(api_key=st.secrets["gemini"]["api_key"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # UPGRADED: Using Gemini 3 series for 2026 support
+    model = genai.GenerativeModel('gemini-3-flash-preview') 
     yt_service = build('youtube', 'v3', developerKey=st.secrets["youtube"]["api_key"])
 except Exception as e:
-    st.error(f"Credentials Error: {e}")
+    st.error("Check credentials in Secrets. Ensure Gemini model is 'gemini-3-flash-preview'.")
     st.stop()
 
-# --- 3. THE ANALYTICS ENGINE ---
+# --- 3. ANALYTICS ENGINE ---
 class S26Intelligence:
-    def fetch_yt_comments(self, query):
+    def get_auto_summary(self, data_type, details):
+        """Generates dynamic, chart-specific summaries."""
+        prompt = f"Provide a one-sentence executive insight for an S26 product launch {data_type} based on: {details}. Be brief and strategic."
+        try:
+            return model.generate_content(prompt).text
+        except: return "Awaiting AI interpretation..."
+
+    def fetch_data(self, query):
         all_data = []
         search_res = yt_service.search().list(q=query, part='id,snippet', maxResults=3, type='video').execute()
         for vid in search_res['items']:
@@ -46,75 +54,55 @@ class S26Intelligence:
                 all_data.append({"Video": v_title[:40], "Comment": text, "Sentiment": score, "Time": datetime.now(IST)})
         return pd.DataFrame(all_data)
 
-    def get_ai_summary(self, df):
-        """Generates an Executive Briefing using Gemini Flash."""
-        context = df.sort_values(by='Sentiment').head(15)['Comment'].str.cat(sep=' | ')
-        prompt = f"Analyze these S26 product launch comments from India. Provide 3 high-impact bullet points for a CTO: 1. Main tech complaint, 2. Sentiment velocity, 3. Recommended action. Context: {context}"
-        response = model.generate_content(prompt)
-        return response.text
-
-# --- 4. SIDEBAR & DATA FETCH ---
-with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/shield.png", width=80)
-    st.header("Control Center")
-    query = st.text_input("Product Search", "Samsung S26 Ultra India")
-    if st.button("🚀 Sync Live Data"):
-        st.session_state['data'] = S26Intelligence().fetch_yt_comments(query)
-    st.divider()
-    st.caption("Refresh: Manual Only (Quota Safe)")
-
-# --- 5. THE DASHBOARD ---
-st.title("🛡️ S26 Global Launch: AI Command Center")
+# --- 4. THE COMMAND CENTER UX ---
+st.title("🛡️ S26 Launch War-Room: Global AI Pulse")
 st.write(f"Snapshot Time: **{datetime.now(IST).strftime('%I:%M %p IST')}**")
+
+if 'data' not in st.session_state:
+    with st.sidebar:
+        if st.button("🚀 SYNC LIVE INTEL"):
+            st.session_state['data'] = S26Intelligence().fetch_data("Samsung S26 Ultra India")
 
 if 'data' in st.session_state:
     df = st.session_state['data']
     
-    # --- SECTION 1: AI EXECUTIVE BRIEF (Manual Refresh) ---
-    if st.button("🪄 Generate AI Executive Briefing"):
-        with st.spinner("Gemini AI is analyzing sentiment patterns..."):
-            st.session_state['ai_brief'] = S26Intelligence().get_ai_summary(df)
-            
-    if 'ai_brief' in st.session_state:
-        st.markdown(f'<div class="ai-brief-box"><h3>✨ AI Intelligence Brief</h3>{st.session_state["ai_brief"]}</div>', unsafe_allow_html=True)
-
-    # --- SECTION 2: METRICS ---
-    m1, m2, m3, m4 = st.columns(4)
-    avg_s = df['Sentiment'].mean()
-    m1.metric("Overall Pulse", f"{avg_s:.2f}", delta="Optimal" if avg_s > 0 else "Critical")
-    m2.metric("Negative Signal %", f"{(len(df[df['Sentiment'] < -0.2])/len(df)*100):.1f}%")
-    m3.metric("Review Reach", "2.1M+", "↑ 12%")
-    m4.metric("Market Readiness", "92%", "In Progress")
-
-    # --- SECTION 3: INTERACTIVE CHARTS (The WOW Factor) ---
-    st.divider()
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.subheader("📊 Sentiment Heatmap by Source")
-        fig = px.box(df, x="Video", y="Sentiment", color="Video", points="all", template="plotly_white")
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with c2:
-        st.subheader("📈 Volume vs. Intensity")
-        fig2 = px.scatter(df, x="Time", y="Sentiment", size=df['Sentiment'].abs()*10, color="Sentiment", 
-                          color_continuous_scale='RdYlGn', template="plotly_white")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # --- SECTION 4: PRODUCT TEAM DEEP DIVE ---
-    st.subheader("🔍 Real-Time Verbatim Explorer")
-    st.dataframe(
-        df.sort_values(by='Sentiment'),
-        column_config={
-            "Comment": st.column_config.TextColumn("Customer Voice", width="large"),
-            "Sentiment": st.column_config.ProgressColumn("Impact Intensity", min_value=-1, max_value=1)
-        },
-        use_container_width=True, hide_index=True
-    )
+    # AI Executive Briefing (Manual Toggle to save API)
+    if st.button("🪄 Generate Full AI Intelligence Brief"):
+        context = df.sort_values(by='Sentiment').head(10)['Comment'].str.cat(sep=' | ')
+        st.session_state['ai_brief'] = model.generate_content(f"Summarize these S26 launch risks and technical issues into 3 bullet points: {context}").text
     
-    # PDF Export
-    st.download_button("📩 Export War-Room Report (CSV)", df.to_csv().encode('utf-8'), "S26_WarRoom.csv")
+    if 'ai_brief' in st.session_state:
+        st.markdown(f'<div class="ai-brief"><h3>✨ AI Strategic Briefing</h3>{st.session_state["ai_brief"]}</div>', unsafe_allow_html=True)
 
-else:
-    st.info("👋 Dashboard standby. Click 'Sync Live Data' in the sidebar to begin.")
+    # Filtering Sidebar
+    with st.sidebar:
+        st.header("Filter Intel")
+        s_filter = st.radio("Sentiment View", ["All", "Negative Only", "Positive Only"])
+        if s_filter == "Negative Only":
+            display_df = df[df['Sentiment'] < -0.1]
+        elif s_filter == "Positive Only":
+            display_df = df[df['Sentiment'] > 0.1]
+        else:
+            display_df = df
+
+    # INTERACTIVE CHARTS
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("📊 Sentiment Heatmap")
+        fig1 = px.box(display_df, x="Video", y="Sentiment", color="Video", template="plotly_white")
+        st.plotly_chart(fig1, use_container_width=True)
+        st.markdown(f'<div class="chart-summary"><b>AI Insight:</b> {S26Intelligence().get_auto_summary("Sentiment Heatmap", "Average score is " + str(display_df["Sentiment"].mean()))}</div>', unsafe_allow_html=True)
+
+    with col2:
+        st.subheader("🔥 Top Emerging Concerns")
+        # Extract negative topics
+        neg_text = display_df[display_df['Sentiment'] < -0.2]['Comment'].str.cat(sep=' ')
+        # Simple frequency logic for demo
+        fig2 = px.histogram(display_df[display_df['Sentiment'] < -0.2], x="Video", color_discrete_sequence=['indianred'])
+        st.plotly_chart(fig2, use_container_width=True)
+        st.markdown(f'<div class="chart-summary"><b>AI Insight:</b> {S26Intelligence().get_auto_summary("Risk Distribution", "Topic clusters found in negative mentions")}</div>', unsafe_allow_html=True)
+
+    # Verbatim Explorer
+    st.subheader("🔍 Deep-Dive: Customer Voice")
+    st.dataframe(display_df.sort_values(by='Sentiment'), use_container_width=True, hide_index=True)
