@@ -3,11 +3,13 @@ import pandas as pd
 import plotly.express as px
 import yfinance as yf
 import feedparser
+import re, os, pytz
+from datetime import datetime
+from collections import Counter
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from streamlit_autorefresh import st_autorefresh
 from google import genai
 from google.genai import types
-import pytz, json, os
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIG & UI ---
 st.set_page_config(page_title="Global Threat Matrix", layout="wide", initial_sidebar_state="collapsed")
@@ -24,145 +26,151 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTICATION ---
-try:
-    client = genai.Client(api_key=st.secrets["gemini"]["api_key"])
-except Exception:
-    st.error("⚠️ System Offline: Verify Gemini API Key.")
-    st.stop()
+# --- 2. LOCAL NLP ENGINE (ZERO API RELIANCE) ---
+class PythonNLPEngine:
+    def __init__(self):
+        self.analyzer = SentimentIntensityAnalyzer()
+        # Lexicon for Geopolitical Escalation
+        self.escalation_words = ['strike', 'war', 'attack', 'missile', 'expand', 'dead', 'retaliate', 'offensive', 'troops', 'fire', 'bomb']
+        self.de_escalation_words = ['ceasefire', 'peace', 'talks', 'negotiate', 'truce', 'diplomacy', 'pact']
+        
+        # Entity mapping for Momentum
+        self.entities = {
+            "US/Israel": ['israel', 'idf', 'netanyahu', 'us', 'usa', 'washington', 'biden', 'trump', 'american'],
+            "Iran/Proxies": ['iran', 'tehran', 'irgc', 'hezbollah', 'houthi', 'hamas', 'proxy']
+        }
 
-# --- 3. DATA ENGINES ---
-class GeoIntelligence:
+    def analyze_threat_level(self, headlines):
+        """Calculates Escalation Index & Momentum using pure Python math."""
+        if not headlines:
+            return 5.0, "Unknown", []
+
+        total_sentiment = 0
+        esc_count = 0
+        de_esc_count = 0
+        entity_mentions = {"US/Israel": 0, "Iran/Proxies": 0}
+        all_words = []
+
+        for h in headlines:
+            title = h['Title'].lower()
+            # 1. VADER Sentiment (Negative sentiment increases threat)
+            total_sentiment += self.analyzer.polarity_scores(title)['compound']
+            
+            # 2. Lexicon Weighting
+            words = re.findall(r'\b\w+\b', title)
+            all_words.extend(words)
+            esc_count += sum(1 for w in words if w in self.escalation_words)
+            de_esc_count += sum(1 for w in words if w in self.de_escalation_words)
+
+            # 3. Entity Tracking (Who is dominating the headlines?)
+            for team, keywords in self.entities.items():
+                entity_mentions[team] += sum(1 for w in words if w in keywords)
+
+        # Calculate Momentum
+        momentum = max(entity_mentions, key=entity_mentions.get) if sum(entity_mentions.values()) > 0 else "Stalemate"
+
+        # Calculate Escalation Index (Formula)
+        avg_sentiment = total_sentiment / len(headlines)
+        # Base 5.0, add points for escalation words, subtract for peace words, subtract sentiment (since negative sentiment = bad)
+        index = 5.0 + (esc_count * 0.3) - (de_esc_count * 0.4) - (avg_sentiment * 2.5)
+        index = max(1.0, min(10.0, round(index, 2))) # Clamp between 1 and 10
+
+        return index, momentum, dict(Counter(all_words).most_common(50))
+
+# --- 3. DATA ACQUISITION ---
+class DataAggregator:
     def fetch_live_markets(self):
-        tickers = {"Crude Oil": "BZ=F", "Gold": "GC=F"}
+        # Added CL=F (WTI Crude) as a fallback if BZ=F (Brent) fails
+        tickers = {"Crude Oil": ["BZ=F", "CL=F"], "Gold": ["GC=F"]}
         market_data = {}
-        for name, ticker in tickers.items():
-            try:
-                data = yf.Ticker(ticker).history(period="5d")
-                if len(data) >= 2:
-                    current = data['Close'].iloc[-1]
-                    prev = data['Close'].iloc[-2]
-                    pct_change = ((current - prev) / prev) * 100
-                    market_data[name] = {"price": current, "change": pct_change}
-            except Exception as e:
-                pass # Fail silently, handled in UI
+        for name, symbols in tickers.items():
+            for sym in symbols:
+                try:
+                    data = yf.Ticker(sym).history(period="5d")
+                    if len(data) >= 2:
+                        current, prev = data['Close'].iloc[-1], data['Close'].iloc[-2]
+                        market_data[name] = {"price": current, "change": ((current - prev) / prev) * 100}
+                        break # Success, stop trying fallbacks
+                except: continue
         return market_data
 
     def fetch_global_news(self):
-        url = "https://news.google.com/rss/search?q=Israel+Iran+US+conflict&hl=en-US&gl=US&ceid=US:en"
         try:
-            feed = feedparser.parse(url)
-            articles = [{"Title": entry.title, "Published": entry.published, "Link": entry.link} for entry in feed.entries[:15]]
-            return articles
-        except Exception:
-            return []
+            feed = feedparser.parse("https://news.google.com/rss/search?q=Israel+Iran+US+conflict&hl=en-US&gl=US&ceid=US:en")
+            return [{"Title": entry.title, "Published": entry.published, "Link": entry.link} for entry in feed.entries[:15]]
+        except: return []
 
-    def analyze_geopolitics(self, headlines):
+def get_ai_summary(headlines):
+    """Optional AI overlay - isolated from core metrics."""
+    try:
+        client = genai.Client(api_key=st.secrets["gemini"]["api_key"])
         text_feed = " | ".join([h['Title'] for h in headlines])
-        prompt = f"""
-        Analyze these live news headlines regarding the Middle East conflict.
-        Return a strict JSON object.
-        - "escalation_index": Float from 1.0 (Peace) to 10.0 (War).
-        - "narrative_momentum": Strategic/media momentum (e.g., "US/Israel", "Iran/Proxies", "Stalemate").
-        - "involved_nations": List of other countries mentioned (e.g., ["Lebanon", "Yemen"]).
-        - "executive_summary": 2-sentence tactical summary.
-        Headlines: {text_feed}
-        """
-        try:
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                    ]
-                )
-            )
-            clean_json = response.text.replace('```json', '').replace('```', '').strip()
-            return json.loads(clean_json)
-        except Exception as e:
-            st.toast(f"AI Quota Exceeded. Charting fallback engaged.", icon="⚠️")
-            return None # Graceful failure
+        res = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"Provide a strict 2-sentence tactical summary of this news: {text_feed}"
+        )
+        return res.text
+    except: return None
 
-def save_to_vault(escalation_score, momentum):
-    new_data = pd.DataFrame([{"Time": datetime.now(IST).strftime('%Y-%m-%d %H:%M'), "Escalation_Index": escalation_score, "Momentum": momentum}])
-    if os.path.exists(VAULT_FILE):
-        df = pd.read_csv(VAULT_FILE)
-        df = pd.concat([df, new_data], ignore_index=True)
-    else:
-        df = new_data
+def save_to_vault(index, momentum):
+    new_data = pd.DataFrame([{"Time": datetime.now(IST).strftime('%Y-%m-%d %H:%M'), "Escalation_Index": index, "Momentum": momentum}])
+    df = pd.concat([pd.read_csv(VAULT_FILE), new_data], ignore_index=True) if os.path.exists(VAULT_FILE) else new_data
     df.to_csv(VAULT_FILE, index=False)
     return df
 
-# --- 4. DASHBOARD EXECUTION ---
+# --- 4. DASHBOARD RENDER ---
 st_autorefresh(interval=5 * 60 * 1000, key="geo_refresh")
 
 st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;'>🌐 GLOBAL THREAT MATRIX: LIVE</h2>", unsafe_allow_html=True)
 st.markdown(f"<p style='text-align: center; color: #8b949e;'>LAST SYNC: {datetime.now(IST).strftime('%d %b %Y | %H:%M:%S IST')}</p>", unsafe_allow_html=True)
 
-engine = GeoIntelligence()
+aggregator = DataAggregator()
+nlp_engine = PythonNLPEngine()
 
-# 1. Fetch Hard Data (Never Blocked)
-markets = engine.fetch_live_markets()
-news = engine.fetch_global_news()
+# 1. Fetch Hard Data
+markets = aggregator.fetch_live_markets()
+news = aggregator.fetch_global_news()
 
-# 2. Attempt AI Analysis (Can be Blocked)
-analysis = None
-if news:
-    analysis = engine.analyze_geopolitics(news)
+# 2. Process via Local Python NLP (NEVER BLOCKED)
+escalation_index, momentum, word_freq = nlp_engine.analyze_threat_level(news)
+history_df = save_to_vault(escalation_index, momentum)
 
-# --- UI RENDER: LEVEL 1 MACRO IMPACT ---
+# --- UI: LEVEL 1 MACRO IMPACT ---
 c1, c2, c3, c4 = st.columns(4)
 
-# AI Dependent Metrics
-if analysis:
-    e_color = "#ff7b72" if analysis['escalation_index'] > 6 else "#d29922"
-    c1.markdown(f"<div class='metric-box'><div class='metric-title'>Escalation Index (1-10)</div><div class='metric-value' style='color: {e_color};'>{analysis['escalation_index']}</div></div>", unsafe_allow_html=True)
-    c2.markdown(f"<div class='metric-box'><div class='metric-title'>Strategic Momentum</div><div class='metric-value'>{analysis['narrative_momentum']}</div></div>", unsafe_allow_html=True)
-    history_df = save_to_vault(analysis['escalation_index'], analysis['narrative_momentum'])
-else:
-    c1.markdown("<div class='metric-box'><div class='metric-title'>Escalation Index (1-10)</div><div class='metric-value' style='color: #8b949e;'>AI OFFLINE</div></div>", unsafe_allow_html=True)
-    c2.markdown("<div class='metric-box'><div class='metric-title'>Strategic Momentum</div><div class='metric-value' style='color: #8b949e;'>API LIMIT HIT</div></div>", unsafe_allow_html=True)
-    history_df = pd.read_csv(VAULT_FILE) if os.path.exists(VAULT_FILE) else pd.DataFrame()
+e_color = "#ff7b72" if escalation_index >= 7 else "#d29922"
+c1.markdown(f"<div class='metric-box'><div class='metric-title'>Escalation Index (1-10)</div><div class='metric-value' style='color: {e_color};'>{escalation_index}</div></div>", unsafe_allow_html=True)
+c2.markdown(f"<div class='metric-box'><div class='metric-title'>Media Momentum</div><div class='metric-value'>{momentum}</div></div>", unsafe_allow_html=True)
 
-# Hard Data Metrics (Always render)
 if "Crude Oil" in markets:
     oil = markets["Crude Oil"]
-    o_color = "#ff7b72" if oil['change'] > 0 else "#3fb950" 
-    c3.markdown(f"<div class='metric-box'><div class='metric-title'>Brent Crude Oil</div><div class='metric-value'>${oil['price']:.2f} <span style='font-size: 1rem; color:{o_color};'>{oil['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
+    c3.markdown(f"<div class='metric-box'><div class='metric-title'>Crude Oil</div><div class='metric-value'>${oil['price']:.2f} <span style='font-size: 1rem; color: #ff7b72;'>{oil['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
 else: c3.info("Oil market data offline.")
 
 if "Gold" in markets:
     gold = markets["Gold"]
-    g_color = "#ff7b72" if gold['change'] > 0 else "#3fb950"
-    c4.markdown(f"<div class='metric-box'><div class='metric-title'>Gold (Safe Haven)</div><div class='metric-value'>${gold['price']:.2f} <span style='font-size: 1rem; color:{g_color};'>{gold['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
+    c4.markdown(f"<div class='metric-box'><div class='metric-title'>Gold (Safe Haven)</div><div class='metric-value'>${gold['price']:.2f} <span style='font-size: 1rem; color: #3fb950;'>{gold['change']:.2f}%</span></div></div>", unsafe_allow_html=True)
 else: c4.info("Gold market data offline.")
 
 st.write("---")
 
-# --- UI RENDER: LEVEL 2 TACTICAL TRENDS ---
+# --- UI: LEVEL 2 TACTICAL TRENDS ---
 colA, colB = st.columns([2, 1])
 
 with colA:
-    st.subheader("📈 Escalation Trendline (Historical Risk)")
+    st.subheader("📈 Escalation Trendline (Locally Computed)")
     if not history_df.empty and len(history_df) > 1:
         fig = px.line(history_df, x="Time", y="Escalation_Index", markers=True, template="plotly_dark")
         fig.update_layout(yaxis_range=[1, 10], yaxis_title="Threat Level (1-10)")
         fig.add_hline(y=7.0, line_dash="dash", line_color="red", annotation_text="Critical Danger Zone")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Awaiting AI connection to draw historical trendline...")
 
-    st.subheader("🤖 AI Strategic Summary")
-    if analysis:
-        st.info(analysis['executive_summary'])
-        if analysis['involved_nations']:
-            st.write("**Secondary Actors Pulled Into Conflict:** " + ", ".join(analysis['involved_nations']))
+    st.subheader("🤖 AI Strategic Summary (Add-On)")
+    ai_summary = get_ai_summary(news)
+    if ai_summary:
+        st.info(ai_summary)
     else:
-        st.warning("⚠️ AI Summary unavailable. Quota limits reached. Please rely on the raw news feed until the API resets in a few minutes.")
+        st.warning("⚠️ AI Summary unavailable (API Quota limit). Dashboard running via Local NLP.")
 
 with colB:
     st.subheader("📡 Live Global Intel Feed")
@@ -174,5 +182,3 @@ with colB:
                 <span style='color: #8b949e; font-size: 0.8rem;'>{article["Published"]}</span>
             </div>
             """, unsafe_allow_html=True)
-    else:
-        st.error("Live News feed disconnected.")
