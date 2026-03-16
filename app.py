@@ -122,25 +122,35 @@ def process_nlp(df):
 st.sidebar.title("⚙️ Live Extraction Engine")
 st.sidebar.markdown("Configure the auto-scraper targets.")
 
-api_key = st.sidebar.text_input("YouTube API Key", type="password")
-video_id = st.sidebar.text_input("YouTube Video ID (e.g., dQw4w9WgXcQ)")
-media_query = st.sidebar.text_input("Media Search Query (e.g., Samsung S26 Ultra)")
+# SECURE: Pulls the API key silently from the Streamlit Vault
+try:
+    api_key = st.secrets["YOUTUBE_API_KEY"]
+except KeyError:
+    st.sidebar.error("⚠️ API Key missing from Streamlit Secrets!")
+    api_key = None
+
+# Set a default tech review video so it runs automatically, but allow them to change it!
+video_id = st.sidebar.text_input("YouTube Video ID", value="ENTER_A_DEFAULT_VIDEO_ID_HERE")
+media_query = st.sidebar.text_input("Media Search Query", value="Samsung S26 Ultra")
 
 if st.sidebar.button("🚀 Run Live Extraction"):
-    with st.spinner("Scraping Web and Processing NLP..."):
-        # 1. Fetch
-        yt_df = fetch_live_youtube_data(api_key, video_id)
-        media_df = fetch_live_media_data(media_query)
-        
-        # 2. Combine
-        combined_df = pd.concat([yt_df, media_df], ignore_index=True)
-        
-        # 3. Process
-        if not combined_df.empty:
-            st.session_state['live_data'] = process_nlp(combined_df)
-            st.success("Data Pipeline Executed Successfully!")
-        else:
-            st.warning("No data returned. Check your inputs.")
+    if not api_key:
+        st.error("Cannot run extraction without API key.")
+    else:
+        with st.spinner("Scraping Web and Processing NLP..."):
+            # 1. Fetch
+            yt_df = fetch_live_youtube_data(api_key, video_id)
+            media_df = fetch_live_media_data(media_query)
+            
+            # 2. Combine
+            combined_df = pd.concat([yt_df, media_df], ignore_index=True)
+            
+            # 3. Process
+            if not combined_df.empty:
+                st.session_state['live_data'] = process_nlp(combined_df)
+                st.success("Data Pipeline Executed Successfully!")
+            else:
+                st.warning("No data returned. Check your inputs.")
 
 # ==========================================
 # 5. MAIN DASHBOARD UI
