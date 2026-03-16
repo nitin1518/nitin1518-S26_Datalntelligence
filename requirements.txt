@@ -1,12 +1,8 @@
+google-genai>=0.3.0
 streamlit
-feedparser
-trafilatura
 pandas
 plotly
 vaderSentiment
-python-dateutil
-nltk>=3.8.1
-yfinance>=0.2.40
-streamlit-autorefresh
 pytz
-scipy
+streamlit-autorefresh
+google-api-python-client
