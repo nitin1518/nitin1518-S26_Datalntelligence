@@ -9,178 +9,184 @@ from textblob import TextBlob
 # 1. PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="S26 Ultra Market Intelligence",
-    page_icon="📈",
+    page_title="S26 Ultra Advanced Intelligence",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ==========================================
-# 2. DATA GENERATION & NLP ENGINE
+# 2. ENTERPRISE DATA ENGINE (5,000 Rows)
 # ==========================================
 @st.cache_data
-def load_data():
-    """Generates and processes the simulated omnichannel dataset."""
+def load_enterprise_data():
     np.random.seed(42)
-    total_rows = 800
-    dates = [datetime(2026, 2, 15) + timedelta(hours=i*0.5) for i in range(total_rows)]
-    platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.5, 0.3, 0.2])
+    total_rows = 5000  # Scaled up 6x for deep-dive accuracy
+    
+    dates = [datetime(2026, 2, 15) + timedelta(minutes=i*4.5) for i in range(total_rows)]
+    platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.55, 0.35, 0.10])
     launch_date = datetime(2026, 2, 25)
+
+    # Base pain points and praises to simulate high-volume NLP
+    negative_prompts = [
+        "Black screen issue on day 2. Samsung quality control is dropping.",
+        "Battery life is terrible compared to Chinese flagships with 6000mAh.",
+        "Overpriced for a minor upgrade. Sticking with my S24 Ultra.",
+        "Anyone else experiencing thermal throttling while gaming?",
+        "The price hike without a storage upgrade is corporate greed.",
+        "Privacy screen is a 10/10, but the battery drains too fast.",
+        "Exynos in India again? Hard pass from me."
+    ]
+    
+    positive_prompts = [
+        "Can't wait for the new privacy display! Looks insane.",
+        "Privacy display is actually really useful in the metro.",
+        "The Flex Magic Pixel tech sounds great for office workers.",
+        "Samsung Galaxy S26 Ultra launches in India with Agentic AI features.",
+        "Camera zoom is still the best in the industry.",
+        "UI feels much smoother than last year."
+    ]
+    
+    neutral_prompts = [
+        "Is the S26 Ultra worth Rs 1,34,999? A deep dive into the specs.",
+        "Just ordered the base model, waiting for delivery.",
+        "S26 Ultra brings the Flex Magic Pixel display."
+    ]
 
     raw_data = []
     for i in range(total_rows):
         p = platforms[i]
         d = dates[i]
         
-        # Simulated Verbatims
-        if p == "Indian Media":
-            content = np.random.choice([
-                "Samsung Galaxy S26 Ultra launches in India with Agentic AI features.",
-                "Is the S26 Ultra worth Rs 1,34,999? A deep dive into the specs.",
-                "S26 Ultra brings the Flex Magic Pixel display, but keeps Exynos for the Indian market."
-            ])
-        elif p == "YouTube":
-            if d < launch_date:
-                content = np.random.choice([
-                    "Can't wait for the new privacy display! Looks insane.",
-                    "Hope they don't increase the base price this year.",
-                    "If it has Exynos in India, I'm skipping it."
-                ])
+        # Logic to simulate realistic post-launch sentiment crash
+        if d < launch_date:
+            content = np.random.choice(positive_prompts + neutral_prompts, p=[0.7, 0.3] if p != "Indian Media" else [0.4, 0.6])
+        else:
+            if p == "Indian Media":
+                content = np.random.choice(positive_prompts + neutral_prompts, p=[0.5, 0.5])
             else:
-                content = np.random.choice([
-                    "Black screen issue on day 2. Samsung quality control is dropping.",
-                    "Battery life is terrible compared to Chinese flagships with 6000mAh.",
-                    "Privacy display is actually really useful in the metro.",
-                    "Overpriced for a minor upgrade. Sticking with my S24 Ultra."
-                ])
-        else: # Reddit
-            if d < launch_date:
-                content = np.random.choice([
-                    "Rumors say the S26 Ultra will feature a 5000mAh battery. Disappointing.",
-                    "The Flex Magic Pixel tech sounds great for office workers."
-                ])
-            else:
-                content = np.random.choice([
-                    "Anyone else experiencing thermal throttling while gaming?",
-                    "The price hike without a storage upgrade is corporate greed.",
-                    "Privacy screen is a 10/10, but the battery drains too fast."
-                ])
+                content = np.random.choice(negative_prompts + positive_prompts + neutral_prompts, p=[0.6, 0.2, 0.2])
                 
         raw_data.append({
             "Date": d,
             "Platform": p,
             "Content": content,
-            "Engagement": int(np.random.exponential(scale=300 if p == "Reddit" else 1500))
+            "Engagement": int(np.random.exponential(scale=200 if p == "Reddit" else 1000))
         })
 
     df = pd.DataFrame(raw_data)
     df['Phase'] = np.where(df['Date'] < launch_date, 'Pre-Launch', 'Post-Launch')
     
-    # NLP Processing Functions
-    def analyze_sentiment(text): return TextBlob(text).sentiment.polarity
-    def extract_feature(text):
-        text = text.lower()
-        if any(word in text for word in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
-        if any(word in text for word in ['battery', 'drain', 'mah']): return 'Battery'
-        if any(word in text for word in ['price', 'overpriced', 'rs']): return 'Price/Value'
-        if any(word in text for word in ['exynos', 'thermal', 'gaming', 'chip']): return 'Performance/Chip'
-        return 'General/Other'
+    # Accelerated NLP Processing
+    def extract_feature_and_sentiment(text):
+        text_lower = text.lower()
+        score = TextBlob(text).sentiment.polarity
+        
+        # Determine Feature
+        if any(word in text_lower for word in ['screen', 'display', 'pixel', 'black']): feature = 'Display/Screen'
+        elif any(word in text_lower for word in ['battery', 'drain', 'mah']): feature = 'Battery/Power'
+        elif any(word in text_lower for word in ['price', 'overpriced', 'rs', 'hike']): feature = 'Price/Value'
+        elif any(word in text_lower for word in ['exynos', 'thermal', 'gaming', 'chip']): feature = 'Performance/Chip'
+        elif any(word in text_lower for word in ['camera', 'zoom']): feature = 'Camera'
+        else: feature = 'General/Software'
+            
+        # Determine Strict Sentiment Category
+        if score > 0.05: category = 'Positive'
+        elif score < -0.05: category = 'Negative'
+        else: category = 'Neutral'
+            
+        return pd.Series([feature, score, category])
 
-    df['Sentiment'] = df['Content'].apply(analyze_sentiment)
-    df['Feature'] = df['Content'].apply(extract_feature)
+    df[['Feature', 'Sentiment_Score', 'Sentiment_Category']] = df['Content'].apply(extract_feature_and_sentiment)
     return df, launch_date
 
-# Load the data
-df, launch_date = load_data()
+# Load Data
+df, launch_date = load_enterprise_data()
 
 # ==========================================
-# 3. SIDEBAR CONTROLS
+# 3. ADVANCED SIDEBAR CONTROLS
 # ==========================================
-st.sidebar.title("Data Filters")
-st.sidebar.markdown("Use these controls to isolate specific market signals.")
+st.sidebar.title("Deep-Dive Filters")
+st.sidebar.markdown("Isolate the exact market signals you need.")
 
-selected_platform = st.sidebar.multiselect(
-    "Select Platforms", 
-    options=df['Platform'].unique(), 
-    default=df['Platform'].unique()
-)
+selected_platform = st.sidebar.multiselect("📡 Platform", df['Platform'].unique(), default=df['Platform'].unique())
+selected_phase = st.sidebar.radio("⏱️ Launch Phase", ["All", "Pre-Launch", "Post-Launch"])
+selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
+selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
 
-selected_phase = st.sidebar.radio(
-    "Select Launch Phase", 
-    ["All", "Pre-Launch (Rumor/Hype)", "Post-Launch (Reality)"]
-)
+# Apply Advanced Filters
+filtered_df = df[
+    (df['Platform'].isin(selected_platform)) &
+    (df['Feature'].isin(selected_feature)) &
+    (df['Sentiment_Category'].isin(selected_sentiment))
+]
 
-# Apply Filters
-filtered_df = df[df['Platform'].isin(selected_platform)]
-if selected_phase == "Pre-Launch (Rumor/Hype)":
-    filtered_df = filtered_df[filtered_df['Phase'] == 'Pre-Launch']
-elif selected_phase == "Post-Launch (Reality)":
-    filtered_df = filtered_df[filtered_df['Phase'] == 'Post-Launch']
+if selected_phase != "All":
+    filtered_df = filtered_df[filtered_df['Phase'] == selected_phase]
 
 # ==========================================
 # 4. MAIN DASHBOARD UI
 # ==========================================
-st.title("📈 S26 Ultra: Omnichannel Market Intelligence")
-st.markdown("Dynamic C-Level Dashboard tracking Pre and Post-Launch Sentiment across the Indian Market.")
+st.title("🧠 S26 Ultra: Advanced Deep-Level Analysis")
 
-# High-Level KPIs
-st.markdown("### Executive Summary Metrics")
-col1, col2, col3 = st.columns(3)
-col1.metric("Total Data Points", f"{len(filtered_df):,}")
-col2.metric("Average Sentiment", f"{filtered_df['Sentiment'].mean():.3f}", help="-1.0 (Highly Negative) to 1.0 (Highly Positive)")
-col3.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}", help="Total upvotes, likes, and shares.")
+# Executive KPIs
+total_mentions = len(filtered_df)
+if total_mentions > 0:
+    pct_negative = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Negative']) / total_mentions) * 100
+    pct_positive = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Positive']) / total_mentions) * 100
+else:
+    pct_negative = pct_positive = 0
 
-st.markdown("---")
-
-# Visualizations Row
-col_chart1, col_chart2 = st.columns(2)
-
-with col_chart1:
-    st.subheader("1. Sentiment Trajectory")
-    st.markdown("Tracks the narrative drift over time.")
-    timeline_df = filtered_df.groupby([pd.Grouper(key='Date', freq='1D'), 'Platform'])['Sentiment'].mean().reset_index()
-    fig1 = px.line(timeline_df, x='Date', y='Sentiment', color='Platform', markers=True, template="plotly_dark")
-    
-    # Add Launch Day Marker if viewing 'All' or 'Pre-Launch'
-    if selected_phase in ["All", "Pre-Launch (Rumor/Hype)"]:
-        fig1.add_vline(x=launch_date.timestamp() * 1000, line_dash="dash", line_color="red", annotation_text="Launch Day")
-    
-    fig1.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.18, showarrow=False, font=dict(color="gray", size=10))
-    fig1.update_layout(margin=dict(l=0, r=0, t=30, b=30), height=400)
-    st.plotly_chart(fig1, use_container_width=True)
-
-with col_chart2:
-    st.subheader("2. Feature Risk Matrix")
-    st.markdown("Identifies viral complaints (High Engagement + Negative Sentiment).")
-    risk_df = filtered_df.groupby('Feature').agg({'Sentiment':'mean', 'Engagement':'sum'}).reset_index()
-    fig2 = px.scatter(risk_df, x='Sentiment', y='Engagement', size='Engagement', color='Feature', 
-                      template="plotly_dark", size_max=45)
-    fig2.add_vline(x=0, line_dash="dash", line_color="white")
-    fig2.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.18, showarrow=False, font=dict(color="gray", size=10))
-    fig2.update_layout(margin=dict(l=0, r=0, t=30, b=30), height=400)
-    st.plotly_chart(fig2, use_container_width=True)
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Data Points", f"{total_mentions:,}")
+col2.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}")
+col3.metric("🔥 Negative Share", f"{pct_negative:.1f}%", delta="Critical Detractors", delta_color="inverse")
+col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%", delta="Brand Advocates", delta_color="normal")
 
 st.markdown("---")
 
-# Strategic Data Tables
-st.subheader("📑 Strategic Insights & Verbatim Feedback")
-tab1, tab2, tab3 = st.tabs(["Platform Health Matrix", "Feature Performance Matrix", "Top Viral Complaints"])
+# ==========================================
+# 5. TOPIC POLARIZATION (The "What is Positive/Negative" Chart)
+# ==========================================
+st.subheader("1. Topic Polarization Matrix")
+st.markdown("Reveals exactly what percentage of conversation inside each topic is driving churn vs. advocacy.")
 
-with tab1:
-    st.markdown("**Platform Health (Pre vs Post Launch)**")
-    platform_health = df.pivot_table(index='Platform', columns='Phase', values='Sentiment', aggfunc='mean').round(3)
-    st.dataframe(platform_health, use_container_width=True)
+if not filtered_df.empty:
+    # Group by Feature and Sentiment Category to get counts
+    topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
+    
+    fig_topic = px.bar(
+        topic_breakdown, 
+        x='Count', 
+        y='Feature', 
+        color='Sentiment_Category', 
+        orientation='h',
+        barmode='stack', # Try '100%' for relative sizing
+        color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'},
+        template="plotly_dark",
+        title="Positive vs Negative Ratio per Topic"
+    )
+    fig_topic.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.15, showarrow=False, font=dict(color="gray", size=10))
+    st.plotly_chart(fig_topic, use_container_width=True)
+else:
+    st.warning("No data matches the current filters.")
 
-with tab2:
-    st.markdown("**Post-Launch Feature Assessment**")
-    feature_perf = df[df['Phase'] == 'Post-Launch'].groupby('Feature').agg({'Sentiment':'mean', 'Engagement':'sum'}).reset_index().sort_values(by='Sentiment').round(3)
-    st.dataframe(feature_perf, use_container_width=True)
+st.markdown("---")
 
-with tab3:
-    st.markdown("**Top Negative Verbatims by Engagement**")
-    complaints_df = filtered_df[(filtered_df['Sentiment'] < 0)].sort_values(by='Engagement', ascending=False)
-    top_verbatims = complaints_df.drop_duplicates(subset=['Feature']).head(5)
-    st.dataframe(top_verbatims[['Platform', 'Feature', 'Engagement', 'Content']], use_container_width=True)
+# ==========================================
+# 6. DYNAMIC DRILL-DOWN TABLES
+# ==========================================
+st.subheader("2. Filtered Verbatim Deep-Dive")
+st.markdown("Read the exact comments driving the metrics above. Sort by Engagement to find Viral threats.")
 
-# Footer Branding
-st.markdown("<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #333;'>SAMSUNG GALAXY S26 ULTRA - CATEGORY LEADERSHIP DASHBOARD</div>", unsafe_allow_html=True)
+# Display clean dataframe formatted for C-Level reading
+display_df = filtered_df[['Date', 'Platform', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
+
+# Stylize the dataframe based on sentiment
+def color_sentiment(val):
+    color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
+    return f'color: {color}'
+
+st.dataframe(display_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=400)
+
+st.markdown("<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px;'>SAMSUNG GALAXY S26 ULTRA - OMNICHANNEL DEEP DIVE</div>", unsafe_allow_html=True)
