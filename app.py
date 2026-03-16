@@ -21,13 +21,12 @@ st.set_page_config(
 @st.cache_data
 def load_enterprise_data():
     np.random.seed(42)
-    total_rows = 5000  # Scaled up 6x for deep-dive accuracy
+    total_rows = 5000  # Scaled up for deep-dive accuracy
     
     dates = [datetime(2026, 2, 15) + timedelta(minutes=i*4.5) for i in range(total_rows)]
     platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.55, 0.35, 0.10])
     launch_date = datetime(2026, 2, 25)
 
-    # Base pain points and praises to simulate high-volume NLP
     negative_prompts = [
         "Black screen issue on day 2. Samsung quality control is dropping.",
         "Battery life is terrible compared to Chinese flagships with 6000mAh.",
@@ -58,14 +57,23 @@ def load_enterprise_data():
         p = platforms[i]
         d = dates[i]
         
-        # Logic to simulate realistic post-launch sentiment crash
+        # BUG FIX: Safely handling probability distributions
         if d < launch_date:
-            content = np.random.choice(positive_prompts + neutral_prompts, p=[0.7, 0.3] if p != "Indian Media" else [0.4, 0.6])
+            if p != "Indian Media":
+                category = np.random.choice(['pos', 'neu'], p=[0.7, 0.3])
+            else:
+                category = np.random.choice(['pos', 'neu'], p=[0.4, 0.6])
+                
+            content = np.random.choice(positive_prompts) if category == 'pos' else np.random.choice(neutral_prompts)
         else:
             if p == "Indian Media":
-                content = np.random.choice(positive_prompts + neutral_prompts, p=[0.5, 0.5])
+                category = np.random.choice(['pos', 'neu'], p=[0.5, 0.5])
+                content = np.random.choice(positive_prompts) if category == 'pos' else np.random.choice(neutral_prompts)
             else:
-                content = np.random.choice(negative_prompts + positive_prompts + neutral_prompts, p=[0.6, 0.2, 0.2])
+                category = np.random.choice(['neg', 'pos', 'neu'], p=[0.6, 0.2, 0.2])
+                if category == 'neg': content = np.random.choice(negative_prompts)
+                elif category == 'pos': content = np.random.choice(positive_prompts)
+                else: content = np.random.choice(neutral_prompts)
                 
         raw_data.append({
             "Date": d,
@@ -77,27 +85,28 @@ def load_enterprise_data():
     df = pd.DataFrame(raw_data)
     df['Phase'] = np.where(df['Date'] < launch_date, 'Pre-Launch', 'Post-Launch')
     
-    # Accelerated NLP Processing
-    def extract_feature_and_sentiment(text):
+    # BULLETPROOF NLP PROCESSING: Breaking it down so Pandas never fails
+    def get_feature(text):
         text_lower = text.lower()
-        score = TextBlob(text).sentiment.polarity
-        
-        # Determine Feature
-        if any(word in text_lower for word in ['screen', 'display', 'pixel', 'black']): feature = 'Display/Screen'
-        elif any(word in text_lower for word in ['battery', 'drain', 'mah']): feature = 'Battery/Power'
-        elif any(word in text_lower for word in ['price', 'overpriced', 'rs', 'hike']): feature = 'Price/Value'
-        elif any(word in text_lower for word in ['exynos', 'thermal', 'gaming', 'chip']): feature = 'Performance/Chip'
-        elif any(word in text_lower for word in ['camera', 'zoom']): feature = 'Camera'
-        else: feature = 'General/Software'
-            
-        # Determine Strict Sentiment Category
-        if score > 0.05: category = 'Positive'
-        elif score < -0.05: category = 'Negative'
-        else: category = 'Neutral'
-            
-        return pd.Series([feature, score, category])
+        if any(word in text_lower for word in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
+        elif any(word in text_lower for word in ['battery', 'drain', 'mah']): return 'Battery/Power'
+        elif any(word in text_lower for word in ['price', 'overpriced', 'rs', 'hike']): return 'Price/Value'
+        elif any(word in text_lower for word in ['exynos', 'thermal', 'gaming', 'chip']): return 'Performance/Chip'
+        elif any(word in text_lower for word in ['camera', 'zoom']): return 'Camera'
+        return 'General/Software'
 
-    df[['Feature', 'Sentiment_Score', 'Sentiment_Category']] = df['Content'].apply(extract_feature_and_sentiment)
+    def get_score(text):
+        return TextBlob(text).sentiment.polarity
+        
+    def get_category(score):
+        if score > 0.05: return 'Positive'
+        elif score < -0.05: return 'Negative'
+        return 'Neutral'
+
+    df['Feature'] = df['Content'].apply(get_feature)
+    df['Sentiment_Score'] = df['Content'].apply(get_score)
+    df['Sentiment_Category'] = df['Sentiment_Score'].apply(get_category)
+    
     return df, launch_date
 
 # Load Data
@@ -146,13 +155,12 @@ col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%", delta="Brand Advocates
 st.markdown("---")
 
 # ==========================================
-# 5. TOPIC POLARIZATION (The "What is Positive/Negative" Chart)
+# 5. TOPIC POLARIZATION 
 # ==========================================
 st.subheader("1. Topic Polarization Matrix")
 st.markdown("Reveals exactly what percentage of conversation inside each topic is driving churn vs. advocacy.")
 
 if not filtered_df.empty:
-    # Group by Feature and Sentiment Category to get counts
     topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
     
     fig_topic = px.bar(
@@ -161,7 +169,7 @@ if not filtered_df.empty:
         y='Feature', 
         color='Sentiment_Category', 
         orientation='h',
-        barmode='stack', # Try '100%' for relative sizing
+        barmode='stack', 
         color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'},
         template="plotly_dark",
         title="Positive vs Negative Ratio per Topic"
@@ -179,10 +187,8 @@ st.markdown("---")
 st.subheader("2. Filtered Verbatim Deep-Dive")
 st.markdown("Read the exact comments driving the metrics above. Sort by Engagement to find Viral threats.")
 
-# Display clean dataframe formatted for C-Level reading
 display_df = filtered_df[['Date', 'Platform', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
 
-# Stylize the dataframe based on sentiment
 def color_sentiment(val):
     color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
     return f'color: {color}'
