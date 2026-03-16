@@ -2,215 +2,189 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from datetime import datetime, timedelta
 from textblob import TextBlob
+from googleapiclient.discovery import build
+import feedparser
+from datetime import datetime
+import re
 
 # ==========================================
 # 1. PAGE CONFIGURATION
 # ==========================================
-st.set_page_config(
-    page_title="S26 Ultra Advanced Intelligence",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Live Market Intelligence", page_icon="📡", layout="wide")
 
 # ==========================================
-# 2. ENTERPRISE DATA ENGINE (5,000 Rows)
+# 2. SMART SCRAPING ENGINES (Cached to prevent blocking)
+# ==========================================
+# TTL = 3600 seconds (1 hour). The app will auto-scrape new data every hour, preventing API bans.
+@st.cache_data(ttl=3600, show_spinner=False) 
+def fetch_live_youtube_data(api_key, video_id, max_comments=200):
+    if not api_key or not video_id:
+        return pd.DataFrame()
+        
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.commentThreads().list(
+            part="snippet", videoId=video_id, maxResults=100, order="relevance", textFormat="plainText"
+        )
+        
+        comments_data = []
+        extracted = 0
+        
+        while request and extracted < max_comments:
+            response = request.execute()
+            for item in response['items']:
+                snippet = item['snippet']['topLevelComment']['snippet']
+                comments_data.append({
+                    "Date": snippet['publishedAt'],
+                    "Platform": "YouTube",
+                    "Content": snippet['textDisplay'],
+                    "Engagement": int(snippet['likeCount'])
+                })
+                extracted += 1
+            
+            if 'nextPageToken' in response:
+                request = youtube.commentThreads().list(
+                    part="snippet", videoId=video_id, pageToken=response['nextPageToken'], 
+                    maxResults=100, order="relevance", textFormat="plainText"
+                )
+            else:
+                break
+                
+        return pd.DataFrame(comments_data)
+    except Exception as e:
+        st.error(f"YouTube API Error: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_live_media_data(query):
+    if not query:
+        return pd.DataFrame()
+        
+    try:
+        # Smart Scraping: Bypassing HTML blocks by using Google News RSS feeds
+        # Formatted for the Indian Market (hl=en-IN, gl=IN)
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+        feed = feedparser.parse(url)
+        
+        media_data = []
+        for entry in feed.entries[:100]: # Grab top 100 recent articles
+            media_data.append({
+                "Date": entry.published,
+                "Platform": "Indian Media",
+                "Content": entry.title, # Article headline
+                "Engagement": 500 # Baseline media weight
+            })
+            
+        return pd.DataFrame(media_data)
+    except Exception as e:
+        st.error(f"Media Extraction Error: {e}")
+        return pd.DataFrame()
+
+# ==========================================
+# 3. ADVANCED NLP PIPELINE
 # ==========================================
 @st.cache_data
-def load_enterprise_data():
-    np.random.seed(42)
-    total_rows = 5000  
+def process_nlp(df):
+    if df.empty: return df
     
-    dates = [datetime(2026, 2, 15) + timedelta(minutes=i*4.5) for i in range(total_rows)]
-    platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.55, 0.35, 0.10])
-    launch_date = datetime(2026, 2, 25)
-
-    negative_prompts = [
-        "Black screen issue on day 2. Samsung quality control is dropping.",
-        "Battery life is terrible compared to Chinese flagships with 6000mAh.",
-        "Overpriced for a minor upgrade. Sticking with my S24 Ultra.",
-        "Anyone else experiencing thermal throttling while gaming?",
-        "The price hike without a storage upgrade is corporate greed.",
-        "Privacy screen is a 10/10, but the battery drains too fast.",
-        "Exynos in India again? Hard pass from me."
-    ]
-    
-    positive_prompts = [
-        "Can't wait for the new privacy display! Looks insane.",
-        "Privacy display is actually really useful in the metro.",
-        "The Flex Magic Pixel tech sounds great for office workers.",
-        "Samsung Galaxy S26 Ultra launches in India with Agentic AI features.",
-        "Camera zoom is still the best in the industry.",
-        "UI feels much smoother than last year."
-    ]
-    
-    neutral_prompts = [
-        "Is the S26 Ultra worth Rs 1,34,999? A deep dive into the specs.",
-        "Just ordered the base model, waiting for delivery.",
-        "S26 Ultra brings the Flex Magic Pixel display."
-    ]
-
-    raw_data = []
-    for i in range(total_rows):
-        p = platforms[i]
-        d = dates[i]
-        
-        if d < launch_date:
-            if p != "Indian Media":
-                category = np.random.choice(['pos', 'neu'], p=[0.7, 0.3])
-            else:
-                category = np.random.choice(['pos', 'neu'], p=[0.4, 0.6])
-                
-            content = np.random.choice(positive_prompts) if category == 'pos' else np.random.choice(neutral_prompts)
-        else:
-            if p == "Indian Media":
-                category = np.random.choice(['pos', 'neu'], p=[0.5, 0.5])
-                content = np.random.choice(positive_prompts) if category == 'pos' else np.random.choice(neutral_prompts)
-            else:
-                category = np.random.choice(['neg', 'pos', 'neu'], p=[0.6, 0.2, 0.2])
-                if category == 'neg': content = np.random.choice(negative_prompts)
-                elif category == 'pos': content = np.random.choice(positive_prompts)
-                else: content = np.random.choice(neutral_prompts)
-                
-        raw_data.append({
-            "Date": d,
-            "Platform": p,
-            "Content": content,
-            "Engagement": int(np.random.exponential(scale=200 if p == "Reddit" else 1000))
-        })
-
-    df = pd.DataFrame(raw_data)
-    df['Phase'] = np.where(df['Date'] < launch_date, 'Pre-Launch', 'Post-Launch')
-    
-    # ADVANCED NLP: Tech Context Override Dictionary
-    tech_overrides = {
-        "looks insane": 0.8, # Awesome
-        "base model": 0.0,   # Neutral entry tier
-        "hard pass": -0.9,   # Strong rejection
-        "10/10": 0.9         # Perfect score
-    }
+    # Tech Context Override
+    tech_overrides = {"insane": 0.8, "base model": 0.0, "hard pass": -0.9, "10/10": 0.9, "beast": 0.8}
 
     def get_feature(text):
-        text_lower = text.lower()
-        if any(word in text_lower for word in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
-        elif any(word in text_lower for word in ['battery', 'drain', 'mah']): return 'Battery/Power'
-        elif any(word in text_lower for word in ['price', 'overpriced', 'rs', 'hike']): return 'Price/Value'
-        elif any(word in text_lower for word in ['exynos', 'thermal', 'gaming', 'chip']): return 'Performance/Chip'
-        elif any(word in text_lower for word in ['camera', 'zoom']): return 'Camera'
-        return 'General/Software'
+        t = text.lower()
+        if any(w in t for w in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
+        elif any(w in t for w in ['battery', 'drain', 'mah', 'charge']): return 'Battery/Power'
+        elif any(w in t for w in ['price', 'overpriced', 'rs', 'cost']): return 'Price/Value'
+        elif any(w in t for w in ['exynos', 'snapdragon', 'thermal', 'heat']): return 'Performance/Chip'
+        elif any(w in t for w in ['camera', 'zoom', 'lens']): return 'Camera'
+        return 'General/Other'
 
     def get_score(text):
-        text_lower = text.lower()
-        # Check override dictionary first
+        t = text.lower()
         for key, val in tech_overrides.items():
-            if key in text_lower:
-                return val
-        # Default to standard NLP if no tech slang is found
+            if key in t: return val
         return TextBlob(text).sentiment.polarity
         
     def get_category(score):
-        if score > 0.05: return 'Positive'
-        elif score < -0.05: return 'Negative'
+        if score > 0.1: return 'Positive'
+        elif score < -0.1: return 'Negative'
         return 'Neutral'
 
     df['Feature'] = df['Content'].apply(get_feature)
     df['Sentiment_Score'] = df['Content'].apply(get_score)
     df['Sentiment_Category'] = df['Sentiment_Score'].apply(get_category)
+    return df
+
+# ==========================================
+# 4. SIDEBAR & APP STATE
+# ==========================================
+st.sidebar.title("⚙️ Live Extraction Engine")
+st.sidebar.markdown("Configure the auto-scraper targets.")
+
+api_key = st.sidebar.text_input("YouTube API Key", type="password")
+video_id = st.sidebar.text_input("YouTube Video ID (e.g., dQw4w9WgXcQ)")
+media_query = st.sidebar.text_input("Media Search Query (e.g., Samsung S26 Ultra)")
+
+if st.sidebar.button("🚀 Run Live Extraction"):
+    with st.spinner("Scraping Web and Processing NLP..."):
+        # 1. Fetch
+        yt_df = fetch_live_youtube_data(api_key, video_id)
+        media_df = fetch_live_media_data(media_query)
+        
+        # 2. Combine
+        combined_df = pd.concat([yt_df, media_df], ignore_index=True)
+        
+        # 3. Process
+        if not combined_df.empty:
+            st.session_state['live_data'] = process_nlp(combined_df)
+            st.success("Data Pipeline Executed Successfully!")
+        else:
+            st.warning("No data returned. Check your inputs.")
+
+# ==========================================
+# 5. MAIN DASHBOARD UI
+# ==========================================
+st.title("📡 Live Omnichannel Intelligence")
+
+if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
+    df = st.session_state['live_data']
     
-    return df, launch_date
-
-# Load Data
-df, launch_date = load_enterprise_data()
-
-# ==========================================
-# 3. ADVANCED SIDEBAR CONTROLS
-# ==========================================
-st.sidebar.title("Deep-Dive Filters")
-st.sidebar.markdown("Isolate the exact market signals you need.")
-
-selected_platform = st.sidebar.multiselect("📡 Platform", df['Platform'].unique(), default=df['Platform'].unique())
-selected_phase = st.sidebar.radio("⏱️ Launch Phase", ["All", "Pre-Launch", "Post-Launch"])
-selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
-selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
-
-# Apply Filters
-filtered_df = df[
-    (df['Platform'].isin(selected_platform)) &
-    (df['Feature'].isin(selected_feature)) &
-    (df['Sentiment_Category'].isin(selected_sentiment))
-]
-
-if selected_phase != "All":
-    filtered_df = filtered_df[filtered_df['Phase'] == selected_phase]
-
-# ==========================================
-# 4. MAIN DASHBOARD UI
-# ==========================================
-st.title("🧠 S26 Ultra: Advanced Deep-Level Analysis")
-
-# Executive KPIs
-total_mentions = len(filtered_df)
-if total_mentions > 0:
-    pct_negative = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Negative']) / total_mentions) * 100
-    pct_positive = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Positive']) / total_mentions) * 100
-else:
-    pct_negative = pct_positive = 0
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Data Points", f"{total_mentions:,}")
-col2.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}")
-col3.metric("🔥 Negative Share", f"{pct_negative:.1f}%", delta="Critical Detractors", delta_color="inverse")
-col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%", delta="Brand Advocates", delta_color="normal")
-
-st.markdown("---")
-
-# ==========================================
-# 5. TOPIC POLARIZATION 
-# ==========================================
-st.subheader("1. Topic Polarization Matrix")
-
-if not filtered_df.empty:
-    topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
+    # Executive KPIs
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Live Data Points Scraped", f"{len(df):,}")
     
-    fig_topic = px.bar(
-        topic_breakdown, 
-        x='Count', 
-        y='Feature', 
-        color='Sentiment_Category', 
-        orientation='h',
-        barmode='stack', 
-        color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'},
-        template="plotly_dark"
+    pct_negative = (len(df[df['Sentiment_Category'] == 'Negative']) / len(df)) * 100
+    pct_positive = (len(df[df['Sentiment_Category'] == 'Positive']) / len(df)) * 100
+    
+    col2.metric("🔥 Negative Share", f"{pct_negative:.1f}%")
+    col3.metric("⭐ Positive Share", f"{pct_positive:.1f}%")
+
+    st.markdown("---")
+    
+    # The Media vs Consumer Reality Gap
+    st.subheader("Platform Health: Media PR vs. Consumer Reality")
+    platform_breakdown = df.groupby(['Platform', 'Sentiment_Category']).size().reset_index(name='Count')
+    fig_platform = px.bar(
+        platform_breakdown, x='Count', y='Platform', color='Sentiment_Category', 
+        orientation='h', barmode='stack', template="plotly_dark",
+        color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
     )
-    fig_topic.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.15, showarrow=False, font=dict(color="gray", size=10))
-    st.plotly_chart(fig_topic, use_container_width=True)
+    st.plotly_chart(fig_platform, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Live Aggregated Verbatims
+    st.subheader("Live Narrative Deep-Dive")
+    agg_df = df.groupby(['Content', 'Platform', 'Feature', 'Sentiment_Category']).agg(
+        Total_Engagement=('Engagement', 'sum')
+    ).reset_index().sort_values(by='Total_Engagement', ascending=False)
+    
+    def color_sentiment(val):
+        color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
+        return f'color: {color}'
+        
+    st.dataframe(agg_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=400)
+
 else:
-    st.warning("No data matches the current filters.")
-
-st.markdown("---")
-
-# ==========================================
-# 6. DYNAMIC AGGREGATED TABLES
-# ==========================================
-st.subheader("2. Aggregated Narrative Deep-Dive")
-st.markdown("Identifies the total viral reach of specific community narratives, eliminating duplicates.")
-
-# FIX: Grouping by exact text content to sum engagement and remove duplicates
-agg_df = filtered_df.groupby(['Content', 'Feature', 'Sentiment_Category']).agg(
-    Total_Mentions=('Content', 'count'),
-    Total_Engagement=('Engagement', 'sum')
-).reset_index().sort_values(by='Total_Engagement', ascending=False)
-
-def color_sentiment(val):
-    color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
-    return f'color: {color}'
-
-st.dataframe(
-    agg_df.style.map(color_sentiment, subset=['Sentiment_Category']), 
-    use_container_width=True, 
-    height=400
-)
-
-st.markdown("<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px;'>SAMSUNG GALAXY S26 ULTRA - OMNICHANNEL DEEP DIVE</div>", unsafe_allow_html=True)
+    st.info("👈 Enter your targets in the sidebar and click 'Run Live Extraction' to start the pipeline.")
