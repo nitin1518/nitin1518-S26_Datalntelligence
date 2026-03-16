@@ -21,7 +21,7 @@ st.set_page_config(
 @st.cache_data
 def load_enterprise_data():
     np.random.seed(42)
-    total_rows = 5000  # Scaled up for deep-dive accuracy
+    total_rows = 5000  
     
     dates = [datetime(2026, 2, 15) + timedelta(minutes=i*4.5) for i in range(total_rows)]
     platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.55, 0.35, 0.10])
@@ -57,7 +57,6 @@ def load_enterprise_data():
         p = platforms[i]
         d = dates[i]
         
-        # BUG FIX: Safely handling probability distributions
         if d < launch_date:
             if p != "Indian Media":
                 category = np.random.choice(['pos', 'neu'], p=[0.7, 0.3])
@@ -85,7 +84,14 @@ def load_enterprise_data():
     df = pd.DataFrame(raw_data)
     df['Phase'] = np.where(df['Date'] < launch_date, 'Pre-Launch', 'Post-Launch')
     
-    # BULLETPROOF NLP PROCESSING: Breaking it down so Pandas never fails
+    # ADVANCED NLP: Tech Context Override Dictionary
+    tech_overrides = {
+        "looks insane": 0.8, # Awesome
+        "base model": 0.0,   # Neutral entry tier
+        "hard pass": -0.9,   # Strong rejection
+        "10/10": 0.9         # Perfect score
+    }
+
     def get_feature(text):
         text_lower = text.lower()
         if any(word in text_lower for word in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
@@ -96,6 +102,12 @@ def load_enterprise_data():
         return 'General/Software'
 
     def get_score(text):
+        text_lower = text.lower()
+        # Check override dictionary first
+        for key, val in tech_overrides.items():
+            if key in text_lower:
+                return val
+        # Default to standard NLP if no tech slang is found
         return TextBlob(text).sentiment.polarity
         
     def get_category(score):
@@ -123,7 +135,7 @@ selected_phase = st.sidebar.radio("⏱️ Launch Phase", ["All", "Pre-Launch", "
 selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
 selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
 
-# Apply Advanced Filters
+# Apply Filters
 filtered_df = df[
     (df['Platform'].isin(selected_platform)) &
     (df['Feature'].isin(selected_feature)) &
@@ -158,7 +170,6 @@ st.markdown("---")
 # 5. TOPIC POLARIZATION 
 # ==========================================
 st.subheader("1. Topic Polarization Matrix")
-st.markdown("Reveals exactly what percentage of conversation inside each topic is driving churn vs. advocacy.")
 
 if not filtered_df.empty:
     topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
@@ -171,8 +182,7 @@ if not filtered_df.empty:
         orientation='h',
         barmode='stack', 
         color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'},
-        template="plotly_dark",
-        title="Positive vs Negative Ratio per Topic"
+        template="plotly_dark"
     )
     fig_topic.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.15, showarrow=False, font=dict(color="gray", size=10))
     st.plotly_chart(fig_topic, use_container_width=True)
@@ -182,17 +192,25 @@ else:
 st.markdown("---")
 
 # ==========================================
-# 6. DYNAMIC DRILL-DOWN TABLES
+# 6. DYNAMIC AGGREGATED TABLES
 # ==========================================
-st.subheader("2. Filtered Verbatim Deep-Dive")
-st.markdown("Read the exact comments driving the metrics above. Sort by Engagement to find Viral threats.")
+st.subheader("2. Aggregated Narrative Deep-Dive")
+st.markdown("Identifies the total viral reach of specific community narratives, eliminating duplicates.")
 
-display_df = filtered_df[['Date', 'Platform', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
+# FIX: Grouping by exact text content to sum engagement and remove duplicates
+agg_df = filtered_df.groupby(['Content', 'Feature', 'Sentiment_Category']).agg(
+    Total_Mentions=('Content', 'count'),
+    Total_Engagement=('Engagement', 'sum')
+).reset_index().sort_values(by='Total_Engagement', ascending=False)
 
 def color_sentiment(val):
     color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
     return f'color: {color}'
 
-st.dataframe(display_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=400)
+st.dataframe(
+    agg_df.style.map(color_sentiment, subset=['Sentiment_Category']), 
+    use_container_width=True, 
+    height=400
+)
 
 st.markdown("<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px;'>SAMSUNG GALAXY S26 ULTRA - OMNICHANNEL DEEP DIVE</div>", unsafe_allow_html=True)
