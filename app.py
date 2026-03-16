@@ -1,406 +1,195 @@
-import os
-import re
-import math
-import json
-import html
-import hashlib
-import concurrent.futures as cf
-from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus, urlparse
-
-import feedparser
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import requests
-import streamlit as st
-import trafilatura
-import yfinance as yf
-from dateutil import parser as dtparser
-from nltk.tokenize import sent_tokenize
+from google import genai
+from google.genai import types
+from googleapiclient.discovery import build
+import pytz, json, os
+from datetime import datetime
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
 
-# --- NLTK bootstrap ---
-import nltk
-nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True)
-nltk_data_dir = os.path.join(os.getcwd(), "nltk_data")
-os.makedirs(nltk_data_dir, exist_ok=True)
-nltk.data.path.append(nltk_data_dir)
+# --- 1. CONFIG & WAR-ROOM THEME ---
+st.set_page_config(page_title="S26 Launch: Global Command", layout="wide", initial_sidebar_state="collapsed")
+IST = pytz.timezone('Asia/Kolkata')
+DATA_VAULT = "s26_market_vault"
+analyzer = SentimentIntensityAnalyzer() # Used for the fallback engine
 
-IST = timezone(timedelta(hours=5, minutes=30))
-UTC = timezone.utc
+if not os.path.exists(DATA_VAULT):
+    os.makedirs(DATA_VAULT)
 
-# =========================
-# PAGE CONFIG & STYLE
-# =========================
-st.set_page_config(
-    page_title="War Pulse Live | Iran • Israel • U.S.",
-    page_icon="🛰️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
-
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-html, body, [class*="css"] {font-family:'Inter',sans-serif;}
-.stApp {
-    background:
-        radial-gradient(circle at top left, rgba(56,189,248,0.12), transparent 32%),
-        radial-gradient(circle at top right, rgba(248,113,113,0.10), transparent 28%),
-        linear-gradient(180deg, #07111d 0%, #0b1220 45%, #0f172a 100%);
-    color: #e5edf8;
-}
-.block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
-.hero {
-    padding: 1.25rem 1.4rem;
-    border: 1px solid rgba(148,163,184,0.18);
-    background: linear-gradient(135deg, rgba(15,23,42,0.92), rgba(2,6,23,0.76));
-    border-radius: 22px;
-    box-shadow: 0 18px 60px rgba(0,0,0,0.28);
-    margin-bottom: 1rem;
-}
-.kpi-card, .glass-card {
-    background: linear-gradient(180deg, rgba(15,23,42,0.88), rgba(15,23,42,0.74));
-    border: 1px solid rgba(148,163,184,0.16);
-    border-radius: 20px;
-    padding: 1rem 1rem;
-    box-shadow: 0 12px 36px rgba(0,0,0,0.20);
-}
-.kpi-title {font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; font-weight: 700;}
-.kpi-value {font-size: 2rem; font-weight: 800; color: #f8fafc; line-height: 1.1; margin-top: 0.35rem;}
-.kpi-sub {font-size: 0.80rem; color: #cbd5e1; margin-top: 0.35rem;}
-.live-pill {
-    display:inline-flex; align-items:center; gap:8px; padding:6px 12px;
-    border-radius:999px; background:rgba(239,68,68,0.14); color:#fecaca; font-weight:700; font-size:0.82rem;
-    border:1px solid rgba(239,68,68,0.26);
-}
-.live-dot {width:9px; height:9px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,0.8); animation:pulse 1.7s infinite;}
-@keyframes pulse {0%{box-shadow:0 0 0 0 rgba(239,68,68,0.85);} 70%{box-shadow:0 0 0 12px rgba(239,68,68,0);} 100%{box-shadow:0 0 0 0 rgba(239,68,68,0);}}
-.story-card {
-    padding: 0.85rem 0.95rem; border-radius: 16px; margin-bottom: 0.75rem;
-    background: linear-gradient(180deg, rgba(15,23,42,0.86), rgba(2,6,23,0.72));
-    border:1px solid rgba(148,163,184,0.15);
-}
-.story-card a {color:#f8fafc !important; text-decoration:none;}
-.small-muted {color:#94a3b8; font-size:0.82rem;}
-.section-title {font-size:1.06rem; font-weight:800; color:#f8fafc; margin-bottom:0.6rem;}
-.metric-split {display:flex; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid rgba(148,163,184,0.10);} 
-.metric-split:last-child {border-bottom:none;}
-</style>
+st.markdown("""
+    <style>
+    .stApp { background-color: #0d1117; color: #c9d1d9; font-family: 'Inter', sans-serif; }
+    .metric-box { background-color: #161b22; padding: 20px; border-radius: 8px; border: 1px solid #30363d; }
+    .metric-title { font-size: 0.85rem; color: #8b949e; text-transform: uppercase; font-weight: 600; }
+    .metric-value { font-size: 2.2rem; font-weight: bold; color: #ffffff; margin-top: 5px; }
+    .metric-delta.positive { color: #3fb950; font-size: 1rem; font-weight: bold; }
+    .metric-delta.negative { color: #f85149; font-size: 1rem; font-weight: bold; }
+    .critical-alert { border-left: 4px solid #f85149; background-color: rgba(248, 81, 73, 0.1); padding: 12px; margin-bottom: 8px; border-radius: 4px; }
+    </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# GEOMETRIC COORDINATE PARSER
-# =========================
-class GeometricExtractor:
-    def __init__(self):
-        self.num_pattern = re.compile(r'(?:\$)?\s*([\d\,\.]+)\s*(million|billion|trillion|m|b|t)?(?:\s*dollars|\s*usd)?\b', re.IGNORECASE)
-        
-    def _clean_num(self, val_str, multiplier):
-        try:
-            val = float(val_str.replace(',', ''))
-            mult = (multiplier or '').lower()
-            if mult in ['billion', 'b']: return val * 1000
-            if mult in ['trillion', 't']: return val * 1000000
-            if mult in ['million', 'm']: return val
-            if val > 1000000: return val / 1000000 # Assume raw dollars > 1M
-            return val
-        except: return 0
-
-    def extract(self, text):
-        data = {
-            "US": {"casualties": 0, "missiles": 0, "drones": 0, "loss_m": 0},
-            "Israel": {"casualties": 0, "missiles": 0, "drones": 0, "loss_m": 0},
-            "Iran": {"casualties": 0, "missiles": 0, "drones": 0, "loss_m": 0},
-            "Global": {"casualties": 0, "missiles": 0, "drones": 0, "loss_m": 0}
-        }
-
-        for sent in sent_tokenize(text.lower()):
-            nums = [(m.group(0), m.start(), m.group(1), m.group(2)) for m in self.num_pattern.finditer(sent)]
-            if not nums: continue
-
-            # Metric Coordinates
-            cas_spans = [m.start() for m in re.finditer(r'\b(dead|killed|casualt|fatalit|lives|soldiers|troops)\b', sent)]
-            mis_spans = [m.start() for m in re.finditer(r'\b(missile|rocket|projectile)\b', sent)]
-            dro_spans = [m.start() for m in re.finditer(r'\b(drone|uav|kamikaze)\b', sent)]
-            loss_spans = [m.start() for m in re.finditer(r'\b(damage|loss|cost|destroy|economic|worth)\b', sent)]
-
-            # Faction Coordinates
-            iran_spans = [m.start() for m in re.finditer(r'\b(iran|tehran|isfahan|hezbollah|houthi|gaza|palestin)\b', sent)]
-            isr_spans = [m.start() for m in re.finditer(r'\b(israel|tel aviv|idf|jerusalem)\b', sent)]
-            us_spans = [m.start() for m in re.finditer(r'\b(us|usa|american|us base)\b', sent)]
-
-            for raw_str, num_pos, val_str, mult in nums:
-                val = self._clean_num(val_str, mult)
-                if val == 0 or (val > 100000 and '$' not in raw_str and not mult): continue
-
-                metric = None
-                if '$' in raw_str or 'usd' in raw_str or 'dollar' in raw_str:
-                    metric = "loss_m"
-                else:
-                    min_dist = 100 
-                    for m_type, spans in [("casualties", cas_spans), ("missiles", mis_spans), ("drones", dro_spans), ("loss_m", loss_spans)]:
-                        for s in spans:
-                            dist = abs(num_pos - s)
-                            if dist < min_dist:
-                                min_dist, metric = dist, m_type
-
-                if not metric: continue 
-
-                faction = "Global"
-                f_min_dist = 120
-                for f_type, spans in [("Iran", iran_spans), ("Israel", isr_spans), ("US", us_spans)]:
-                    for s in spans:
-                        dist = abs(num_pos - s)
-                        if dist < f_min_dist:
-                            f_min_dist, faction = dist, f_type
-
-                # Use Max to prevent double counting within the same article
-                data["Global"][metric] = max(data["Global"][metric], val)
-                if faction != "Global":
-                    data[faction][metric] = max(data[faction][metric], val)
-
-        return data
-
-# =========================
-# SCRAPERS & AGGREGATORS
-# =========================
-def clean_text(text: str) -> str:
-    text = html.unescape(text or "")
-    return re.sub(r"\s+", " ", text).strip()
-
-def safe_parse_date(value):
-    try: return dtparser.parse(value)
-    except: return datetime.now(UTC)
-
-def fetch_rss_articles(limit=50) -> list[dict]:
-    feeds = [
-        "https://news.google.com/rss/search?q=Israel+Iran+US+conflict+when:1d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=Israel+Iran+war+death+toll+OR+casualties&hl=en-US&gl=US&ceid=US:en",
-        "http://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
-        "https://www.aljazeera.com/xml/rss/all.xml"
-    ]
-    out, seen = [], set()
-    for url in feeds:
-        try:
-            parsed = feedparser.parse(url)
-            for e in parsed.entries[:limit]:
-                link = (e.get("link") or "").split("?")[0]
-                if link and link not in seen:
-                    seen.add(link)
-                    out.append({
-                        "title": clean_text(e.get("title", "")),
-                        "url": link,
-                        "source": e.get("source", {}).get("title", "News Feed"),
-                        "datetime": safe_parse_date(e.get("published") or e.get("updated")),
-                        "summary": clean_text(e.get("summary", ""))
-                    })
-        except: pass
-    return out
-
-def hydrate_article(article: dict, fetch_full: bool) -> dict:
-    text = f"{article.get('title','')}. {article.get('summary','')}"
-    if fetch_full:
-        try:
-            dl = trafilatura.fetch_url(article["url"], timeout=5)
-            if dl: text += " " + (trafilatura.extract(dl) or "")[:6000]
-        except: pass
-    
-    content = clean_text(text)
-    article["text"] = content
-    article["hash"] = hashlib.md5(content.encode()).hexdigest()[:12]
-    article["day"] = article["datetime"].astimezone(IST).date()
-    return article
-
-@st.cache_data(ttl=300, show_spinner=False)
-def build_live_dataset(max_articles: int, fetch_full: bool):
-    raw_articles = fetch_rss_articles(max_articles)[:max_articles]
-    
-    hydrated = []
-    with cf.ThreadPoolExecutor(max_workers=15) as ex:
-        futs = [ex.submit(hydrate_article, item, fetch_full) for item in raw_articles]
-        for fut in cf.as_completed(futs):
-            try: hydrated.append(fut.result())
-            except: pass
-
-    df = pd.DataFrame(hydrated)
-    if df.empty: return df
-
-    df = df.drop_duplicates(subset=["hash"]).sort_values("datetime", ascending=False)
-    
-    # Apply Geometric Parser
-    extractor = GeometricExtractor()
-    parsed = [extractor.extract(text) for text in df["text"]]
-    
-    # Flatten Data
-    for metric in ["casualties", "missiles", "drones", "loss_m"]:
-        for faction in ["US", "Israel", "Iran", "Global"]:
-            df[f"{faction}_{metric}"] = [d[faction][metric] for d in parsed]
-
-    return df
-
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_market_snapshot():
-    tickers = {"Brent": "BZ=F", "Gold": "GC=F", "S&P 500": "^GSPC", "VIX (Fear)": "^VIX"}
-    rows = []
-    for name, ticker in tickers.items():
-        try:
-            hist = yf.Ticker(ticker).history(period="5d", interval="1d")
-            if len(hist) >= 2:
-                last, prev = float(hist["Close"].iloc[-1]), float(hist["Close"].iloc[-2])
-                delta = (last - prev) / prev * 100
-                rows.append({"name": name, "last": last, "delta_pct": delta})
-        except: pass
-    return rows
-
-def format_money_m(val_m: float) -> str:
-    if val_m == 0: return "$0"
-    if val_m >= 1000: return f"${val_m/1000:,.1f}B"
-    if val_m < 1: return f"${val_m*1000:,.0f}K"
-    return f"${val_m:,.0f}M"
-
-# =========================
-# DASHBOARD RENDERING
-# =========================
-with st.sidebar:
-    st.markdown("### Control Tower")
-    max_articles = st.slider("Live article cap", 60, 400, 200, step=20)
-    fetch_full = st.toggle("Fetch full article text", value=True)
-    if st.button("Force live rebuild", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-with st.spinner("Executing Geometric Coordinate Parsing on Live Data..."):
-    df = build_live_dataset(max_articles, fetch_full)
-
-if df.empty:
-    st.error("No live coverage could be fetched right now.")
+# --- 2. SECRETS & AUTH (NEW SDK) ---
+try:
+    # New SDK initialization
+    client = genai.Client(api_key=st.secrets["gemini"]["api_key"])
+    yt_service = build('youtube', 'v3', developerKey=st.secrets["youtube"]["api_key"])
+except Exception:
+    st.error("⚠️ System Offline: Verify API Keys.")
     st.stop()
 
-# --- AGGREGATIONS (Global Maxima Consensus) ---
-k_cas = df["Global_casualties"].max()
-k_mis = df["Global_missiles"].max()
-k_dro = df["Global_drones"].max()
-k_loss = df["Global_loss_m"].max()
+# --- 3. THE SENSING ENGINE (WITH FAILSAFE) ---
+class MarketSensor:
+    def fetch_raw_data(self, query, max_results=50):
+        raw_comments = []
+        try:
+            res = yt_service.search().list(q=query, part='id', maxResults=3, type='video').execute()
+            for vid in res['items']:
+                comm_res = yt_service.commentThreads().list(part='snippet', videoId=vid['id']['videoId'], maxResults=max_results).execute()
+                for item in comm_res['items']:
+                    raw_comments.append(item['snippet']['topLevelComment']['snippet']['textOriginal'])
+        except Exception as e: st.warning(f"YouTube Fetch limited: {e}")
+        return raw_comments
 
-last_refresh = datetime.now(IST).strftime("%d %b %Y • %H:%M IST")
+    def fallback_processor(self, comments):
+        """If AI fails, this keeps the charts alive using rules & VADER."""
+        data = []
+        for c in comments:
+            score = analyzer.polarity_scores(c)['compound']
+            cl = c.lower()
+            
+            # Basic keyword routing
+            cat = "Generic"
+            if any(w in cl for w in ["camera", "photo", "lens"]): cat = "Camera"
+            elif any(w in cl for w in ["battery", "heat", "drain", "garam"]): cat = "Battery"
+            elif any(w in cl for w in ["screen", "display", "color"]): cat = "Display"
+            elif any(w in cl for w in ["price", "cost", "expensive"]): cat = "Price"
+            
+            data.append({
+                "category": cat,
+                "sentiment": score,
+                "root_cause": "AI Offline (Rule-based Fallback)",
+                "is_urgent": False
+            })
+        return pd.DataFrame(data)
 
-st.markdown(f"""
-<div class="hero">
-  <div style="display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap;">
-    <div>
-      <div class="small-muted" style="font-weight:800; letter-spacing:0.08em; text-transform:uppercase;">Live Conflict Intelligence Dashboard</div>
-      <div style="font-size:2.0rem; font-weight:800; line-height:1.08; margin-top:6px;">War Pulse Live: Iran • Israel • U.S.</div>
-      <div class="small-muted" style="margin-top:8px; max-width:920px;">Powered by Geometric Coordinate Parsing. Extracts precise attribution by mapping numerical proximity to faction and metric keywords.</div>
-    </div>
-    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:10px;">
-      <div class="live-pill"><span class="live-dot"></span>LIVE INTEL</div>
-      <div class="small-muted">Last refresh: {last_refresh}</div>
-      <div class="small-muted">Signals Processed: {len(df):,}</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-# --- KPI ROW ---
-k1, k2, k3, k4, k5 = st.columns(5)
-kpis = [
-    (k1, "Projectiles Fired", f"{int(k_mis + k_dro):,}", "Missiles + Drones"),
-    (k2, "Global Casualties", f"{int(k_cas):,}", "Max Reported Toll"),
-    (k3, "Economic Loss ($)", format_money_m(k_loss), "Infrastructure Damage"),
-    (k4, "Intel Signals", f"{len(df):,}", "Processed Links"),
-    (k5, "System Status", "LIVE", f"Auto-Sync Active")
-]
-for col, title, val, sub in kpis:
-    col.markdown(f"<div class='kpi-card'><div class='kpi-title'>{title}</div><div class='kpi-value'>{val}</div><div class='kpi-sub'>{sub}</div></div>", unsafe_allow_html=True)
-
-st.write("")
-
-# --- MAIN GRID ---
-left, right = st.columns([1.7, 1.05], gap="large")
-
-with left:
-    st.markdown("<div class='section-title'>Kinetic trendline (Cumulative Media Consensus)</div>", unsafe_allow_html=True)
-    
-    # Calculate daily cumulative maximums to build the timeline
-    daily = df.groupby("day").agg({
-        "Global_casualties": "max", "US_missiles": "max", "Israel_missiles": "max", "Iran_missiles": "max"
-    }).reset_index().sort_values("day")
-    
-    for c in ["Global_casualties", "US_missiles", "Israel_missiles", "Iran_missiles"]:
-        daily[c] = daily[c].cummax()
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["Iran_missiles"], mode="lines+markers", name="Iran Missiles", line=dict(width=3, color="#ef4444")))
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["Israel_missiles"], mode="lines+markers", name="Israel Missiles", line=dict(width=2, color="#60a5fa")))
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["US_missiles"], mode="lines+markers", name="US Missiles", line=dict(width=2, color="#22c55e")))
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["Global_casualties"], mode="lines", name="Casualties", line=dict(width=2, dash="dot", color="#cbd5e1"), yaxis="y2"))
-    
-    fig.update_layout(
-        template="plotly_dark", height=420, margin=dict(l=8, r=8, t=8, b=8),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.30)",
-        legend=dict(orientation="h", y=1.12), hovermode="x unified",
-        yaxis=dict(title="Projectiles Fired"), yaxis2=dict(title="Casualties", overlaying="y", side="right")
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("<div class='section-title'>Attributed Projectile Mix</div>", unsafe_allow_html=True)
-        proj_df = pd.DataFrame({
-            "Actor": ["US", "Israel", "Iran"],
-            "Missiles": [df["US_missiles"].max(), df["Israel_missiles"].max(), df["Iran_missiles"].max()],
-            "Drones": [df["US_drones"].max(), df["Israel_drones"].max(), df["Iran_drones"].max()],
-        }).melt(id_vars="Actor", var_name="Type", value_name="Count")
+    def process_with_llm(self, comments):
+        prompt = f"""
+        Analyze this raw market feedback for the Samsung S26 India launch.
+        Return a JSON array of objects. For each comment, extract:
+        - "category": [Camera, Battery, Display, Performance, Price, OS/Software, Design, Generic].
+        - "sentiment": Float from -1.0 (Defect/Hate) to 1.0 (Love/Perfect).
+        - "root_cause": If sentiment < 0, exact technical issue in 2-4 words (e.g., "Shutter lag"). Else, "None".
+        - "is_urgent": Boolean (true if major hardware failure, safety issue, or refund demand).
         
-        fig2 = px.bar(proj_df, x="Actor", y="Count", color="Type", barmode="group", template="plotly_dark", height=320, color_discrete_sequence=["#ef4444", "#f59e0b"])
-        fig2.update_layout(margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.30)")
-        st.plotly_chart(fig2, use_container_width=True)
+        Comments: {json.dumps(comments)}
+        """
+        try:
+            # Using the NEW SDK generation syntax and stable 2.0 Flash model
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
+            df = pd.DataFrame(json.loads(response.text))
+            df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
+            return df
+        except Exception as e:
+            st.toast(f"AI Engine Offline. Engaging VADER Fallback. Error: {e}", icon="⚠️")
+            df = self.fallback_processor(comments)
+            df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
+            return df
 
-    with c2:
-        st.markdown("<div class='section-title'>Attributed Casualties</div>", unsafe_allow_html=True)
-        cas_df = pd.DataFrame({
-            "Target": ["US", "Israel", "Iran"],
-            "Casualties": [df["US_casualties"].max(), df["Israel_casualties"].max(), df["Iran_casualties"].max()]
-        })
-        fig3 = px.pie(cas_df, names="Target", values="Casualties", hole=0.58, template="plotly_dark", height=320, color="Target", color_discrete_map={"US":"#22c55e", "Israel":"#60a5fa", "Iran":"#ef4444"})
-        fig3.update_layout(margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
-        st.plotly_chart(fig3, use_container_width=True)
+def load_historical_data():
+    files = [f for f in os.listdir(DATA_VAULT) if f.endswith('.csv')]
+    if not files: return pd.DataFrame()
+    return pd.concat([pd.read_csv(os.path.join(DATA_VAULT, f)) for f in files], ignore_index=True)
 
-with right:
-    st.markdown("<div class='section-title'>Resolved Scoreboard (Maxima)</div>", unsafe_allow_html=True)
-    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+# --- 4. AUTO-PRESENTATION CYCLE ---
+cycle_count = st_autorefresh(interval=30000, key="floor_display_cycle")
+
+st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;'>🛡️ S26 COMMAND: VOC TIME-MACHINE</h2>", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.header("⚙️ Pipeline Controls")
+    if st.button("🔄 TRIGGER LIVE SYNC", use_container_width=True):
+        with st.spinner("Ingesting market signals..."):
+            sensor = MarketSensor()
+            raw = sensor.fetch_raw_data("Samsung S26 Ultra review India")
+            new_df = sensor.process_with_llm(raw)
+            if not new_df.empty:
+                new_df['Raw_Comment'] = raw[:len(new_df)]
+                new_df.to_csv(f"{DATA_VAULT}/sync_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv", index=False)
+                st.success("Network Sync Complete.")
+
+master_df = load_historical_data()
+
+if not master_df.empty:
+    master_df['sync_time'] = pd.to_datetime(master_df['sync_time'])
+    sync_times = sorted(master_df['sync_time'].unique())
+    current_time = sync_times[-1]
+    current_df = master_df[master_df['sync_time'] == current_time]
+    previous_df = master_df[master_df['sync_time'] == sync_times[-2]] if len(sync_times) > 1 else current_df
     
-    scoreboard = [
-        ("US", int(df["US_missiles"].max() + df["US_drones"].max()), int(df["US_casualties"].max()), format_money_m(df["US_loss_m"].max())),
-        ("Israel", int(df["Israel_missiles"].max() + df["Israel_drones"].max()), int(df["Israel_casualties"].max()), format_money_m(df["Israel_loss_m"].max())),
-        ("Iran", int(df["Iran_missiles"].max() + df["Iran_drones"].max()), int(df["Iran_casualties"].max()), format_money_m(df["Iran_loss_m"].max())),
-        ("Global", int(k_mis + k_dro), int(k_cas), format_money_m(k_loss)),
-    ]
-    for name, proj, cas, loss in scoreboard:
-        st.markdown(f"<div class='metric-split'><div><div style='font-weight:800; font-size:1rem'>{name}</div><div class='small-muted'>Projectiles / Casualties / Losses</div></div><div style='text-align:right'><div style='font-weight:800'>{proj:,} proj.</div><div class='small-muted'>{cas:,} casualties • {loss}</div></div></div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    # KPIs
+    curr_pulse, prev_pulse = current_df['sentiment'].mean(), previous_df['sentiment'].mean()
+    curr_urgent, prev_urgent = current_df['is_urgent'].sum(), previous_df['is_urgent'].sum()
+    pulse_delta, urgent_delta = curr_pulse - prev_pulse, curr_urgent - prev_urgent
 
-    st.markdown("<div class='section-title' style='margin-top:1rem;'>Macro market shock</div>", unsafe_allow_html=True)
-    for row in fetch_market_snapshot():
-        st.metric(row["name"], f"{row['last']:,.2f}", f"{row['delta_pct']:+.2f}%")
+    # ROW 1: KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    delta_color = "positive" if pulse_delta >= 0 else "negative"
+    delta_sign = "+" if pulse_delta >= 0 else ""
+    c1.markdown(f"<div class='metric-box'><div class='metric-title'>Market Pulse (-1 to 1)</div><div class='metric-value'>{curr_pulse:.2f} <span class='metric-delta {delta_color}'>{delta_sign}{pulse_delta:.2f}</span></div></div>", unsafe_allow_html=True)
+    
+    u_color = "positive" if urgent_delta <= 0 else "negative"
+    u_sign = "+" if urgent_delta > 0 else ""
+    c2.markdown(f"<div class='metric-box'><div class='metric-title'>Urgent Red Flags</div><div class='metric-value' style='color: #ff7b72;'>{curr_urgent} <span class='metric-delta {u_color}'>{u_sign}{urgent_delta}</span></div></div>", unsafe_allow_html=True)
+    
+    top_issue = current_df[current_df['sentiment'] < 0]['category'].mode()[0] if not current_df[current_df['sentiment'] < 0].empty else 'Stable'
+    c3.markdown(f"<div class='metric-box'><div class='metric-title'>Primary Heat Area</div><div class='metric-value'>{top_issue}</div></div>", unsafe_allow_html=True)
+    c4.markdown(f"<div class='metric-box'><div class='metric-title'>Total Signals Processed</div><div class='metric-value'>{len(master_df)}</div></div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='section-title' style='margin-top:1rem;'>Top Extracted Reports</div>", unsafe_allow_html=True)
-    # Sort by the most catastrophic articles
-    df['severity'] = df['Global_casualties'] + df['Global_missiles'] + (df['Global_loss_m'] / 5)
-    for _, r in df[df['severity'] > 0].sort_values(by='severity', ascending=False).head(5).iterrows():
-        tags = []
-        if r['Global_casualties'] > 0: tags.append(f"⚠️ {int(r['Global_casualties']):,} Cas.")
-        if r['Global_missiles'] > 0: tags.append(f"🚀 {int(r['Global_missiles']):,} Mis.")
-        if r['Global_loss_m'] > 0: tags.append(f"💰 {format_money_m(r['Global_loss_m'])}")
-        
-        st.markdown(f"""
-        <div class='story-card'>
-          <a href='{r['url']}' target='_blank'>{r['title']}</a>
-          <div class='small-muted' style='margin-top:4px;'>{r['source']} • {' | '.join(tags)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.write("---")
+
+    # --- ROW 2: AUTO-CYCLING VIEWS ---
+    if cycle_count % 2 == 0:
+        st.subheader("📡 The Threat Matrix: Aspect vs. Sentiment")
+        matrix_df = current_df.groupby('category').agg(Avg_Sentiment=('sentiment', 'mean'), Mentions=('category', 'count')).reset_index()
+        fig = px.scatter(matrix_df, x="Avg_Sentiment", y="Mentions", color="category", size="Mentions", text="category", template="plotly_dark", title="<br>← CRISIS ZONE | SAFE ZONE →")
+        fig.update_traces(textposition='top center')
+        fig.add_vline(x=0, line_width=2, line_dash="dash", line_color="red")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.subheader("📈 Aspect Sentiment Velocity (Historical Trend)")
+        if len(sync_times) > 1:
+            trend_df = master_df.groupby([master_df['sync_time'].dt.strftime('%m-%d %H:%M'), 'category'])['sentiment'].mean().reset_index()
+            trend_df.rename(columns={'sync_time': 'Time'}, inplace=True)
+            fig = px.line(trend_df, x="Time", y="sentiment", color="category", markers=True, template="plotly_dark")
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Crisis Threshold")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Awaiting second sync to generate trendlines.")
+
+    # --- ROW 3: TICKER & LOG ---
+    st.write("---")
+    colA, colB = st.columns([1, 2])
+    with colA:
+        st.subheader("🚨 Escalation Ticker")
+        urgent_items = current_df[current_df['is_urgent'] == True]
+        if not urgent_items.empty:
+            for _, row in urgent_items.head(3).iterrows():
+                st.markdown(f"<div class='critical-alert'><strong>[{row['category'].upper()}]</strong> {row['root_cause']}</div>", unsafe_allow_html=True)
+        else: st.success("Clear: No urgent failures.")
+    
+    with colB:
+        st.subheader("🛠️ Auto-Extracted Root Causes")
+        debug_df = current_df[current_df['sentiment'] < -0.1][['category', 'root_cause', 'sentiment', 'Raw_Comment']].sort_values(by='sentiment').head(5)
+        if not debug_df.empty: st.dataframe(debug_df, use_container_width=True, hide_index=True)
+        else: st.info("No significant negative signals.")
+
+else:
+    st.info("Data Vault is empty. Open the sidebar and click 'Trigger Live Sync'.")
