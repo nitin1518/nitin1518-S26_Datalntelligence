@@ -1,4 +1,3 @@
-import urllib.parse
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,7 +5,8 @@ import plotly.express as px
 from textblob import TextBlob
 from googleapiclient.discovery import build
 import feedparser
-from datetime import datetime, timedelta
+from datetime import datetime
+import urllib.parse
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -23,27 +23,68 @@ st.set_page_config(
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_top_youtube_videos(api_key, query, max_videos=3):
-    """Silently searches YouTube for the top relevant review videos."""
-    if not api_key or not query: return []
+    """Silently searches YouTube for the top videos AND fetches Channel metadata."""
+    if not api_key or not query: return [], pd.DataFrame()
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.search().list(
-            part="id",
+        
+        # 1. Search for top videos
+        search_request = youtube.search().list(
+            part="snippet",
             q=query + " review", 
             type="video",
             relevanceLanguage="en",
             maxResults=max_videos,
             order="relevance" 
         )
-        response = request.execute()
-        return [item['id']['videoId'] for item in response.get('items', [])]
+        search_response = search_request.execute()
+        
+        video_metadata = []
+        channel_ids = []
+        
+        for item in search_response.get('items', []):
+            vid_id = item['id']['videoId']
+            ch_id = item['snippet']['channelId']
+            
+            video_metadata.append({
+                "Video ID": vid_id,
+                "Video Title": item['snippet']['title'],
+                "Channel Name": item['snippet']['channelTitle'],
+                "Channel ID": ch_id
+            })
+            channel_ids.append(ch_id)
+            
+        # 2. Fetch Subscriber Counts for those channels
+        if channel_ids:
+            channel_request = youtube.channels().list(
+                part="statistics",
+                id=",".join(channel_ids)
+            )
+            channel_response = channel_request.execute()
+            
+            # Map channel ID to subscriber count
+            sub_data = {
+                item['id']: int(item['statistics'].get('subscriberCount', 0)) 
+                for item in channel_response.get('items', [])
+            }
+            
+            # Attach subscribers to our metadata
+            for video in video_metadata:
+                video['Subscribers'] = sub_data.get(video['Channel ID'], "Hidden")
+                
+        # Return both the list of IDs (for the comment scraper) and the formatted table
+        video_ids = [v["Video ID"] for v in video_metadata]
+        sources_df = pd.DataFrame(video_metadata)[["Channel Name", "Subscribers", "Video Title", "Video ID"]]
+        
+        return video_ids, sources_df
+
     except Exception as e:
         st.error(f"YouTube Search API Error: {e}")
-        return []
+        return [], pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False) 
 def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
-    """Pulls live comments from the auto-discovered videos."""
+    """Pulls live comments AND the commenter's username."""
     if not api_key or not video_ids: return pd.DataFrame()
     
     youtube = build('youtube', 'v3', developerKey=api_key)
@@ -62,8 +103,9 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
                     comments_data.append({
                         "Date": snippet['publishedAt'],
                         "Platform": "YouTube",
+                        "Author": snippet.get('authorDisplayName', 'Anonymous'),
                         "Content": snippet['textDisplay'],
-                        "Engagement": int(snippet['likeCount'])
+                        "Engagement": int(snippet.get('likeCount', 0))
                     })
                     extracted += 1
                 
@@ -86,8 +128,6 @@ def fetch_live_media_data(query):
     try:
         # FIX: Safely encode the spaces in the query for the URL
         safe_query = urllib.parse.quote(query)
-        
-        # Formatted for the Indian Market (hl=en-IN, gl=IN)
         url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
         feed = feedparser.parse(url)
         
@@ -96,6 +136,7 @@ def fetch_live_media_data(query):
             media_data.append({
                 "Date": entry.published,
                 "Platform": "Indian Media",
+                "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
                 "Content": entry.title, 
                 "Engagement": 500 # Baseline media engagement weight
             })
@@ -111,7 +152,6 @@ def fetch_live_media_data(query):
 def process_nlp(df):
     if df.empty: return df
     
-    # Custom Dictionary to prevent false negatives
     tech_overrides = {
         "insane": 0.8, "base model": 0.0, "hard pass": -0.9, 
         "10/10": 0.9, "beast": 0.8, "trash": -0.9, "sick": 0.8
@@ -146,9 +186,8 @@ def process_nlp(df):
 # 4. SIDEBAR & EXTRACTION TRIGGER
 # ==========================================
 st.sidebar.title("⚙️ Live Extraction Engine")
-st.sidebar.markdown("Enter a product name. The engine will find the top media articles and YouTube reviews automatically.")
+st.sidebar.markdown("Enter a product name to auto-scrape the web.")
 
-# Secure API Key Retrieval from Streamlit Vault
 try:
     api_key = st.secrets["YOUTUBE_API_KEY"]
 except KeyError:
@@ -163,7 +202,9 @@ if st.sidebar.button("🚀 Run Zero-Touch Extraction"):
     else:
         with st.spinner(f"Hunting top videos and live news for '{master_query}'..."):
             
-            top_video_ids = get_top_youtube_videos(api_key, master_query)
+            # Fetch Video IDs AND the Creator Metadata
+            top_video_ids, sources_df = get_top_youtube_videos(api_key, master_query)
+            
             yt_df = fetch_live_youtube_data(api_key, top_video_ids)
             media_df = fetch_live_media_data(master_query)
             
@@ -171,32 +212,65 @@ if st.sidebar.button("🚀 Run Zero-Touch Extraction"):
             
             if not combined_df.empty:
                 st.session_state['live_data'] = process_nlp(combined_df)
-                st.success(f"✅ Successfully scraped {len(top_video_ids)} top videos and live news feeds!")
+                st.session_state['sources_data'] = sources_df # Save the YouTuber data
+                st.success(f"✅ Successfully scraped data!")
             else:
                 st.warning("No data returned. Check your inputs.")
 
 # ==========================================
-# 5. MAIN DASHBOARD UI
+# 5. DYNAMIC FILTERS (Applied to the live data)
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.title("🔍 Data Filters")
+
+# Only show filters if data exists in session state
+if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
+    df = st.session_state['live_data']
+    
+    selected_platform = st.sidebar.multiselect("📡 Platform", df['Platform'].unique(), default=df['Platform'].unique())
+    selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
+    selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
+    
+    # Apply filters to create a view
+    filtered_df = df[
+        (df['Platform'].isin(selected_platform)) &
+        (df['Feature'].isin(selected_feature)) &
+        (df['Sentiment_Category'].isin(selected_sentiment))
+    ]
+else:
+    filtered_df = pd.DataFrame()
+
+# ==========================================
+# 6. MAIN DASHBOARD UI
 # ==========================================
 st.title("📡 Live Omnichannel Intelligence")
 st.markdown("Automated Category Leadership Dashboard tracking real-time market sentiment.")
 
-if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
-    df = st.session_state['live_data']
+if not filtered_df.empty:
     
     # -----------------------------------
     # KPI ROW
     # -----------------------------------
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Data Points Scraped", f"{len(df):,}")
-    col2.metric("Total Engagement", f"{df['Engagement'].sum():,}")
+    col1.metric("Filtered Mentions", f"{len(filtered_df):,}")
+    col2.metric("Filtered Engagement", f"{filtered_df['Engagement'].sum():,}")
     
-    pct_negative = (len(df[df['Sentiment_Category'] == 'Negative']) / len(df)) * 100
-    pct_positive = (len(df[df['Sentiment_Category'] == 'Positive']) / len(df)) * 100
+    pct_negative = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Negative']) / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
+    pct_positive = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Positive']) / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
     
     col3.metric("🔥 Negative Share", f"{pct_negative:.1f}%")
     col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%")
 
+    st.markdown("---")
+
+    # -----------------------------------
+    # DATA SOURCES SUMMARY
+    # -----------------------------------
+    if 'sources_data' in st.session_state and not st.session_state['sources_data'].empty:
+        with st.expander("🎥 View Tracked YouTube Channels (Click to Expand)", expanded=False):
+            st.markdown("The engine automatically targeted these top influencers based on YouTube's relevance algorithm:")
+            st.dataframe(st.session_state['sources_data'], use_container_width=True)
+            
     st.markdown("---")
     
     # -----------------------------------
@@ -206,47 +280,48 @@ if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
     
     with col_chart1:
         st.subheader("1. Topic Polarization")
-        st.markdown("Positive vs Negative ratio inside each specific feature.")
-        topic_breakdown = df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
-        fig_topic = px.bar(
-            topic_breakdown, x='Count', y='Feature', color='Sentiment_Category', 
-            orientation='h', barmode='stack', template="plotly_dark",
-            color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
-        )
-        fig_topic.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig_topic, use_container_width=True)
+        topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
+        if not topic_breakdown.empty:
+            fig_topic = px.bar(
+                topic_breakdown, x='Count', y='Feature', color='Sentiment_Category', 
+                orientation='h', barmode='stack', template="plotly_dark",
+                color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
+            )
+            fig_topic.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig_topic, use_container_width=True)
 
     with col_chart2:
         st.subheader("2. Platform Health")
-        st.markdown("Media PR narrative vs. YouTube Consumer reality.")
-        platform_breakdown = df.groupby(['Platform', 'Sentiment_Category']).size().reset_index(name='Count')
-        fig_platform = px.bar(
-            platform_breakdown, x='Count', y='Platform', color='Sentiment_Category', 
-            orientation='h', barmode='stack', template="plotly_dark",
-            color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
-        )
-        fig_platform.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig_platform, use_container_width=True)
+        platform_breakdown = filtered_df.groupby(['Platform', 'Sentiment_Category']).size().reset_index(name='Count')
+        if not platform_breakdown.empty:
+            fig_platform = px.bar(
+                platform_breakdown, x='Count', y='Platform', color='Sentiment_Category', 
+                orientation='h', barmode='stack', template="plotly_dark",
+                color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
+            )
+            fig_platform.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig_platform, use_container_width=True)
 
     st.markdown("---")
     
     # -----------------------------------
-    # DEEP DIVE AGGREGATED TABLE
+    # RAW FILTERED VERBATIMS (The Ground Truth)
     # -----------------------------------
-    st.subheader("📑 Live Narrative Deep-Dive")
-    st.markdown("Groups identical narratives and sums their total viral reach across the internet.")
+    st.subheader("💬 Filtered Ground Truth (Raw Verbatims)")
+    st.markdown("Read the exact user comments driving the charts above. Updates automatically based on your sidebar filters.")
     
-    # Group by Content to remove exact duplicates and sum engagement
-    agg_df = df.groupby(['Content', 'Platform', 'Feature', 'Sentiment_Category']).agg(
-        Total_Mentions=('Content', 'count'),
-        Total_Engagement=('Engagement', 'sum')
-    ).reset_index().sort_values(by='Total_Engagement', ascending=False)
+    # Format the dataframe for reading
+    display_df = filtered_df[['Platform', 'Author', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
     
     def color_sentiment(val):
         color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
         return f'color: {color}'
         
-    st.dataframe(agg_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=400)
+    st.dataframe(
+        display_df.style.map(color_sentiment, subset=['Sentiment_Category']), 
+        use_container_width=True, 
+        height=500
+    )
     
     st.markdown(f"<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px;'>LIVE TARGET: {master_query.upper()} | CATEGORY LEADERSHIP DASHBOARD</div>", unsafe_allow_html=True)
 
