@@ -1,3 +1,4 @@
+import urllib.parse
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -83,8 +84,11 @@ def fetch_live_media_data(query):
     """Bypasses HTML blocks using Google News RSS feeds."""
     if not query: return pd.DataFrame()
     try:
+        # FIX: Safely encode the spaces in the query for the URL
+        safe_query = urllib.parse.quote(query)
+        
         # Formatted for the Indian Market (hl=en-IN, gl=IN)
-        url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+        url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
         feed = feedparser.parse(url)
         
         media_data = []
