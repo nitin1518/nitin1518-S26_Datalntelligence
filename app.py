@@ -1,195 +1,186 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from google import genai
-from google.genai import types
-from googleapiclient.discovery import build
-import pytz, json, os
-from datetime import datetime
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, timedelta
+from textblob import TextBlob
 
-# --- 1. CONFIG & WAR-ROOM THEME ---
-st.set_page_config(page_title="S26 Launch: Global Command", layout="wide", initial_sidebar_state="collapsed")
-IST = pytz.timezone('Asia/Kolkata')
-DATA_VAULT = "s26_market_vault"
-analyzer = SentimentIntensityAnalyzer() # Used for the fallback engine
+# ==========================================
+# 1. PAGE CONFIGURATION
+# ==========================================
+st.set_page_config(
+    page_title="S26 Ultra Market Intelligence",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-if not os.path.exists(DATA_VAULT):
-    os.makedirs(DATA_VAULT)
+# ==========================================
+# 2. DATA GENERATION & NLP ENGINE
+# ==========================================
+@st.cache_data
+def load_data():
+    """Generates and processes the simulated omnichannel dataset."""
+    np.random.seed(42)
+    total_rows = 800
+    dates = [datetime(2026, 2, 15) + timedelta(hours=i*0.5) for i in range(total_rows)]
+    platforms = np.random.choice(["YouTube", "Reddit", "Indian Media"], total_rows, p=[0.5, 0.3, 0.2])
+    launch_date = datetime(2026, 2, 25)
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #0d1117; color: #c9d1d9; font-family: 'Inter', sans-serif; }
-    .metric-box { background-color: #161b22; padding: 20px; border-radius: 8px; border: 1px solid #30363d; }
-    .metric-title { font-size: 0.85rem; color: #8b949e; text-transform: uppercase; font-weight: 600; }
-    .metric-value { font-size: 2.2rem; font-weight: bold; color: #ffffff; margin-top: 5px; }
-    .metric-delta.positive { color: #3fb950; font-size: 1rem; font-weight: bold; }
-    .metric-delta.negative { color: #f85149; font-size: 1rem; font-weight: bold; }
-    .critical-alert { border-left: 4px solid #f85149; background-color: rgba(248, 81, 73, 0.1); padding: 12px; margin-bottom: 8px; border-radius: 4px; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 2. SECRETS & AUTH (NEW SDK) ---
-try:
-    # New SDK initialization
-    client = genai.Client(api_key=st.secrets["gemini"]["api_key"])
-    yt_service = build('youtube', 'v3', developerKey=st.secrets["youtube"]["api_key"])
-except Exception:
-    st.error("⚠️ System Offline: Verify API Keys.")
-    st.stop()
-
-# --- 3. THE SENSING ENGINE (WITH FAILSAFE) ---
-class MarketSensor:
-    def fetch_raw_data(self, query, max_results=50):
-        raw_comments = []
-        try:
-            res = yt_service.search().list(q=query, part='id', maxResults=3, type='video').execute()
-            for vid in res['items']:
-                comm_res = yt_service.commentThreads().list(part='snippet', videoId=vid['id']['videoId'], maxResults=max_results).execute()
-                for item in comm_res['items']:
-                    raw_comments.append(item['snippet']['topLevelComment']['snippet']['textOriginal'])
-        except Exception as e: st.warning(f"YouTube Fetch limited: {e}")
-        return raw_comments
-
-    def fallback_processor(self, comments):
-        """If AI fails, this keeps the charts alive using rules & VADER."""
-        data = []
-        for c in comments:
-            score = analyzer.polarity_scores(c)['compound']
-            cl = c.lower()
-            
-            # Basic keyword routing
-            cat = "Generic"
-            if any(w in cl for w in ["camera", "photo", "lens"]): cat = "Camera"
-            elif any(w in cl for w in ["battery", "heat", "drain", "garam"]): cat = "Battery"
-            elif any(w in cl for w in ["screen", "display", "color"]): cat = "Display"
-            elif any(w in cl for w in ["price", "cost", "expensive"]): cat = "Price"
-            
-            data.append({
-                "category": cat,
-                "sentiment": score,
-                "root_cause": "AI Offline (Rule-based Fallback)",
-                "is_urgent": False
-            })
-        return pd.DataFrame(data)
-
-    def process_with_llm(self, comments):
-        prompt = f"""
-        Analyze this raw market feedback for the Samsung S26 India launch.
-        Return a JSON array of objects. For each comment, extract:
-        - "category": [Camera, Battery, Display, Performance, Price, OS/Software, Design, Generic].
-        - "sentiment": Float from -1.0 (Defect/Hate) to 1.0 (Love/Perfect).
-        - "root_cause": If sentiment < 0, exact technical issue in 2-4 words (e.g., "Shutter lag"). Else, "None".
-        - "is_urgent": Boolean (true if major hardware failure, safety issue, or refund demand).
+    raw_data = []
+    for i in range(total_rows):
+        p = platforms[i]
+        d = dates[i]
         
-        Comments: {json.dumps(comments)}
-        """
-        try:
-            # Using the NEW SDK generation syntax and stable 2.0 Flash model
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                )
-            )
-            df = pd.DataFrame(json.loads(response.text))
-            df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
-            return df
-        except Exception as e:
-            st.toast(f"AI Engine Offline. Engaging VADER Fallback. Error: {e}", icon="⚠️")
-            df = self.fallback_processor(comments)
-            df['sync_time'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
-            return df
+        # Simulated Verbatims
+        if p == "Indian Media":
+            content = np.random.choice([
+                "Samsung Galaxy S26 Ultra launches in India with Agentic AI features.",
+                "Is the S26 Ultra worth Rs 1,34,999? A deep dive into the specs.",
+                "S26 Ultra brings the Flex Magic Pixel display, but keeps Exynos for the Indian market."
+            ])
+        elif p == "YouTube":
+            if d < launch_date:
+                content = np.random.choice([
+                    "Can't wait for the new privacy display! Looks insane.",
+                    "Hope they don't increase the base price this year.",
+                    "If it has Exynos in India, I'm skipping it."
+                ])
+            else:
+                content = np.random.choice([
+                    "Black screen issue on day 2. Samsung quality control is dropping.",
+                    "Battery life is terrible compared to Chinese flagships with 6000mAh.",
+                    "Privacy display is actually really useful in the metro.",
+                    "Overpriced for a minor upgrade. Sticking with my S24 Ultra."
+                ])
+        else: # Reddit
+            if d < launch_date:
+                content = np.random.choice([
+                    "Rumors say the S26 Ultra will feature a 5000mAh battery. Disappointing.",
+                    "The Flex Magic Pixel tech sounds great for office workers."
+                ])
+            else:
+                content = np.random.choice([
+                    "Anyone else experiencing thermal throttling while gaming?",
+                    "The price hike without a storage upgrade is corporate greed.",
+                    "Privacy screen is a 10/10, but the battery drains too fast."
+                ])
+                
+        raw_data.append({
+            "Date": d,
+            "Platform": p,
+            "Content": content,
+            "Engagement": int(np.random.exponential(scale=300 if p == "Reddit" else 1500))
+        })
 
-def load_historical_data():
-    files = [f for f in os.listdir(DATA_VAULT) if f.endswith('.csv')]
-    if not files: return pd.DataFrame()
-    return pd.concat([pd.read_csv(os.path.join(DATA_VAULT, f)) for f in files], ignore_index=True)
-
-# --- 4. AUTO-PRESENTATION CYCLE ---
-cycle_count = st_autorefresh(interval=30000, key="floor_display_cycle")
-
-st.markdown("<h2 style='text-align: center; color: #ffffff; letter-spacing: 2px;'>🛡️ S26 COMMAND: VOC TIME-MACHINE</h2>", unsafe_allow_html=True)
-
-with st.sidebar:
-    st.header("⚙️ Pipeline Controls")
-    if st.button("🔄 TRIGGER LIVE SYNC", use_container_width=True):
-        with st.spinner("Ingesting market signals..."):
-            sensor = MarketSensor()
-            raw = sensor.fetch_raw_data("Samsung S26 Ultra review India")
-            new_df = sensor.process_with_llm(raw)
-            if not new_df.empty:
-                new_df['Raw_Comment'] = raw[:len(new_df)]
-                new_df.to_csv(f"{DATA_VAULT}/sync_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv", index=False)
-                st.success("Network Sync Complete.")
-
-master_df = load_historical_data()
-
-if not master_df.empty:
-    master_df['sync_time'] = pd.to_datetime(master_df['sync_time'])
-    sync_times = sorted(master_df['sync_time'].unique())
-    current_time = sync_times[-1]
-    current_df = master_df[master_df['sync_time'] == current_time]
-    previous_df = master_df[master_df['sync_time'] == sync_times[-2]] if len(sync_times) > 1 else current_df
+    df = pd.DataFrame(raw_data)
+    df['Phase'] = np.where(df['Date'] < launch_date, 'Pre-Launch', 'Post-Launch')
     
-    # KPIs
-    curr_pulse, prev_pulse = current_df['sentiment'].mean(), previous_df['sentiment'].mean()
-    curr_urgent, prev_urgent = current_df['is_urgent'].sum(), previous_df['is_urgent'].sum()
-    pulse_delta, urgent_delta = curr_pulse - prev_pulse, curr_urgent - prev_urgent
+    # NLP Processing Functions
+    def analyze_sentiment(text): return TextBlob(text).sentiment.polarity
+    def extract_feature(text):
+        text = text.lower()
+        if any(word in text for word in ['screen', 'display', 'pixel', 'black']): return 'Display/Screen'
+        if any(word in text for word in ['battery', 'drain', 'mah']): return 'Battery'
+        if any(word in text for word in ['price', 'overpriced', 'rs']): return 'Price/Value'
+        if any(word in text for word in ['exynos', 'thermal', 'gaming', 'chip']): return 'Performance/Chip'
+        return 'General/Other'
 
-    # ROW 1: KPIs
-    c1, c2, c3, c4 = st.columns(4)
-    delta_color = "positive" if pulse_delta >= 0 else "negative"
-    delta_sign = "+" if pulse_delta >= 0 else ""
-    c1.markdown(f"<div class='metric-box'><div class='metric-title'>Market Pulse (-1 to 1)</div><div class='metric-value'>{curr_pulse:.2f} <span class='metric-delta {delta_color}'>{delta_sign}{pulse_delta:.2f}</span></div></div>", unsafe_allow_html=True)
+    df['Sentiment'] = df['Content'].apply(analyze_sentiment)
+    df['Feature'] = df['Content'].apply(extract_feature)
+    return df, launch_date
+
+# Load the data
+df, launch_date = load_data()
+
+# ==========================================
+# 3. SIDEBAR CONTROLS
+# ==========================================
+st.sidebar.title("Data Filters")
+st.sidebar.markdown("Use these controls to isolate specific market signals.")
+
+selected_platform = st.sidebar.multiselect(
+    "Select Platforms", 
+    options=df['Platform'].unique(), 
+    default=df['Platform'].unique()
+)
+
+selected_phase = st.sidebar.radio(
+    "Select Launch Phase", 
+    ["All", "Pre-Launch (Rumor/Hype)", "Post-Launch (Reality)"]
+)
+
+# Apply Filters
+filtered_df = df[df['Platform'].isin(selected_platform)]
+if selected_phase == "Pre-Launch (Rumor/Hype)":
+    filtered_df = filtered_df[filtered_df['Phase'] == 'Pre-Launch']
+elif selected_phase == "Post-Launch (Reality)":
+    filtered_df = filtered_df[filtered_df['Phase'] == 'Post-Launch']
+
+# ==========================================
+# 4. MAIN DASHBOARD UI
+# ==========================================
+st.title("📈 S26 Ultra: Omnichannel Market Intelligence")
+st.markdown("Dynamic C-Level Dashboard tracking Pre and Post-Launch Sentiment across the Indian Market.")
+
+# High-Level KPIs
+st.markdown("### Executive Summary Metrics")
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Data Points", f"{len(filtered_df):,}")
+col2.metric("Average Sentiment", f"{filtered_df['Sentiment'].mean():.3f}", help="-1.0 (Highly Negative) to 1.0 (Highly Positive)")
+col3.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}", help="Total upvotes, likes, and shares.")
+
+st.markdown("---")
+
+# Visualizations Row
+col_chart1, col_chart2 = st.columns(2)
+
+with col_chart1:
+    st.subheader("1. Sentiment Trajectory")
+    st.markdown("Tracks the narrative drift over time.")
+    timeline_df = filtered_df.groupby([pd.Grouper(key='Date', freq='1D'), 'Platform'])['Sentiment'].mean().reset_index()
+    fig1 = px.line(timeline_df, x='Date', y='Sentiment', color='Platform', markers=True, template="plotly_dark")
     
-    u_color = "positive" if urgent_delta <= 0 else "negative"
-    u_sign = "+" if urgent_delta > 0 else ""
-    c2.markdown(f"<div class='metric-box'><div class='metric-title'>Urgent Red Flags</div><div class='metric-value' style='color: #ff7b72;'>{curr_urgent} <span class='metric-delta {u_color}'>{u_sign}{urgent_delta}</span></div></div>", unsafe_allow_html=True)
+    # Add Launch Day Marker if viewing 'All' or 'Pre-Launch'
+    if selected_phase in ["All", "Pre-Launch (Rumor/Hype)"]:
+        fig1.add_vline(x=launch_date.timestamp() * 1000, line_dash="dash", line_color="red", annotation_text="Launch Day")
     
-    top_issue = current_df[current_df['sentiment'] < 0]['category'].mode()[0] if not current_df[current_df['sentiment'] < 0].empty else 'Stable'
-    c3.markdown(f"<div class='metric-box'><div class='metric-title'>Primary Heat Area</div><div class='metric-value'>{top_issue}</div></div>", unsafe_allow_html=True)
-    c4.markdown(f"<div class='metric-box'><div class='metric-title'>Total Signals Processed</div><div class='metric-value'>{len(master_df)}</div></div>", unsafe_allow_html=True)
+    fig1.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.18, showarrow=False, font=dict(color="gray", size=10))
+    fig1.update_layout(margin=dict(l=0, r=0, t=30, b=30), height=400)
+    st.plotly_chart(fig1, use_container_width=True)
 
-    st.write("---")
+with col_chart2:
+    st.subheader("2. Feature Risk Matrix")
+    st.markdown("Identifies viral complaints (High Engagement + Negative Sentiment).")
+    risk_df = filtered_df.groupby('Feature').agg({'Sentiment':'mean', 'Engagement':'sum'}).reset_index()
+    fig2 = px.scatter(risk_df, x='Sentiment', y='Engagement', size='Engagement', color='Feature', 
+                      template="plotly_dark", size_max=45)
+    fig2.add_vline(x=0, line_dash="dash", line_color="white")
+    fig2.add_annotation(text="SAMSUNG GALAXY S26 ULTRA", xref="paper", yref="paper", x=0.5, y=-0.18, showarrow=False, font=dict(color="gray", size=10))
+    fig2.update_layout(margin=dict(l=0, r=0, t=30, b=30), height=400)
+    st.plotly_chart(fig2, use_container_width=True)
 
-    # --- ROW 2: AUTO-CYCLING VIEWS ---
-    if cycle_count % 2 == 0:
-        st.subheader("📡 The Threat Matrix: Aspect vs. Sentiment")
-        matrix_df = current_df.groupby('category').agg(Avg_Sentiment=('sentiment', 'mean'), Mentions=('category', 'count')).reset_index()
-        fig = px.scatter(matrix_df, x="Avg_Sentiment", y="Mentions", color="category", size="Mentions", text="category", template="plotly_dark", title="<br>← CRISIS ZONE | SAFE ZONE →")
-        fig.update_traces(textposition='top center')
-        fig.add_vline(x=0, line_width=2, line_dash="dash", line_color="red")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.subheader("📈 Aspect Sentiment Velocity (Historical Trend)")
-        if len(sync_times) > 1:
-            trend_df = master_df.groupby([master_df['sync_time'].dt.strftime('%m-%d %H:%M'), 'category'])['sentiment'].mean().reset_index()
-            trend_df.rename(columns={'sync_time': 'Time'}, inplace=True)
-            fig = px.line(trend_df, x="Time", y="sentiment", color="category", markers=True, template="plotly_dark")
-            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Crisis Threshold")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Awaiting second sync to generate trendlines.")
+st.markdown("---")
 
-    # --- ROW 3: TICKER & LOG ---
-    st.write("---")
-    colA, colB = st.columns([1, 2])
-    with colA:
-        st.subheader("🚨 Escalation Ticker")
-        urgent_items = current_df[current_df['is_urgent'] == True]
-        if not urgent_items.empty:
-            for _, row in urgent_items.head(3).iterrows():
-                st.markdown(f"<div class='critical-alert'><strong>[{row['category'].upper()}]</strong> {row['root_cause']}</div>", unsafe_allow_html=True)
-        else: st.success("Clear: No urgent failures.")
-    
-    with colB:
-        st.subheader("🛠️ Auto-Extracted Root Causes")
-        debug_df = current_df[current_df['sentiment'] < -0.1][['category', 'root_cause', 'sentiment', 'Raw_Comment']].sort_values(by='sentiment').head(5)
-        if not debug_df.empty: st.dataframe(debug_df, use_container_width=True, hide_index=True)
-        else: st.info("No significant negative signals.")
+# Strategic Data Tables
+st.subheader("📑 Strategic Insights & Verbatim Feedback")
+tab1, tab2, tab3 = st.tabs(["Platform Health Matrix", "Feature Performance Matrix", "Top Viral Complaints"])
 
-else:
-    st.info("Data Vault is empty. Open the sidebar and click 'Trigger Live Sync'.")
+with tab1:
+    st.markdown("**Platform Health (Pre vs Post Launch)**")
+    platform_health = df.pivot_table(index='Platform', columns='Phase', values='Sentiment', aggfunc='mean').round(3)
+    st.dataframe(platform_health, use_container_width=True)
+
+with tab2:
+    st.markdown("**Post-Launch Feature Assessment**")
+    feature_perf = df[df['Phase'] == 'Post-Launch'].groupby('Feature').agg({'Sentiment':'mean', 'Engagement':'sum'}).reset_index().sort_values(by='Sentiment').round(3)
+    st.dataframe(feature_perf, use_container_width=True)
+
+with tab3:
+    st.markdown("**Top Negative Verbatims by Engagement**")
+    complaints_df = filtered_df[(filtered_df['Sentiment'] < 0)].sort_values(by='Engagement', ascending=False)
+    top_verbatims = complaints_df.drop_duplicates(subset=['Feature']).head(5)
+    st.dataframe(top_verbatims[['Platform', 'Feature', 'Engagement', 'Content']], use_container_width=True)
+
+# Footer Branding
+st.markdown("<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #333;'>SAMSUNG GALAXY S26 ULTRA - CATEGORY LEADERSHIP DASHBOARD</div>", unsafe_allow_html=True)
