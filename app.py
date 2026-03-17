@@ -33,7 +33,6 @@ st.markdown("""
         --panel: #111827;
         --panel-2: #0F172A;
         --border: #1F2937;
-        --border-2: #273449;
         --text: #F3F4F6;
         --muted: #9CA3AF;
         --muted-2: #94A3B8;
@@ -41,7 +40,6 @@ st.markdown("""
         --green: #10B981;
         --red: #EF4444;
         --amber: #F59E0B;
-        --gray: #6B7280;
         --purple: #8B5CF6;
     }
 
@@ -120,10 +118,6 @@ st.markdown("""
         font-weight: 700;
     }
 
-    div[data-testid="metric-container"] [data-testid="stMetricDelta"] {
-        color: var(--accent) !important;
-    }
-
     .insight-chip {
         display: inline-block;
         background: rgba(56,189,248,0.12);
@@ -195,10 +189,7 @@ st.markdown("""
         overflow: hidden;
     }
 
-    hr {
-        border-color: var(--border) !important;
-    }
-
+    hr { border-color: var(--border) !important; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {background-color: transparent !important;}
@@ -300,16 +291,12 @@ TECH_OVERRIDES = {
 # =========================================================
 if "yt_db" not in st.session_state:
     st.session_state["yt_db"] = pd.DataFrame()
-
 if "sources_db" not in st.session_state:
     st.session_state["sources_db"] = pd.DataFrame()
-
 if "live_data" not in st.session_state:
     st.session_state["live_data"] = pd.DataFrame()
-
 if "custom_feature_tags" not in st.session_state:
     st.session_state["custom_feature_tags"] = []
-
 if "custom_feature_input" not in st.session_state:
     st.session_state["custom_feature_input"] = ""
 
@@ -321,12 +308,30 @@ def normalize_text(text):
 
 def normalize_for_matching(text):
     text = str(text).lower().strip()
-    text = text.replace("–", "-").replace("—", "-").replace("-", "-")
+    text = text.replace("–", "-").replace("—", "-")
     text = text.replace("/", " ").replace("_", " ")
     text = text.replace("-", " ")
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+def build_flexible_pattern(phrase):
+    norm = normalize_for_matching(phrase)
+    if not norm:
+        return None
+
+    words = norm.split()
+    parts = []
+
+    for w in words:
+        if w.isdigit():
+            parts.append(rf"{re.escape(w)}")
+        elif len(w) <= 3:
+            parts.append(rf"{re.escape(w)}")
+        else:
+            parts.append(rf"{re.escape(w)}(?:s|ed|ing)?")
+
+    return r"\b" + r"\s*".join(parts) + r"\b"
 
 def safe_log1p(x):
     try:
@@ -372,36 +377,23 @@ def get_score(text):
 def get_category(score):
     if score > 0.05:
         return "Positive"
-    elif score < -0.05:
+    if score < -0.05:
         return "Negative"
     return "Neutral"
 
 def get_features(text, custom_list):
-    raw_text = str(text)
-    t = normalize_for_matching(raw_text)
+    t = normalize_for_matching(text)
     matched = []
 
-    # Custom features
     for custom_feat in custom_list:
-        feat = custom_feat.strip()
-        if not feat:
-            continue
+        pattern = build_flexible_pattern(custom_feat)
+        if pattern and re.search(pattern, t):
+            matched.append(custom_feat)
 
-        feat_norm = normalize_for_matching(feat)
-
-        if feat_norm and feat_norm in t:
-            matched.append(feat)
-            continue
-
-        feat_words = [w for w in feat_norm.split() if w]
-        if feat_words and all(word in t for word in feat_words):
-            matched.append(feat)
-
-    # Built-in features
     for feature, keywords in FEATURE_MAP.items():
         for kw in keywords:
-            kw_norm = normalize_for_matching(kw)
-            if kw_norm and kw_norm in t:
+            pattern = build_flexible_pattern(kw)
+            if pattern and re.search(pattern, t):
                 matched.append(feature)
                 break
 
@@ -413,8 +405,8 @@ def detect_pain_points(text):
 
     for pain_point, vals in PAIN_POINT_MAP.items():
         for v in vals:
-            v_norm = normalize_for_matching(v)
-            if v_norm and v_norm in t:
+            pattern = build_flexible_pattern(v)
+            if pattern and re.search(pattern, t):
                 found.append(pain_point)
                 break
 
@@ -426,8 +418,8 @@ def classify_intent(text):
 
     for intent, vals in INTENT_MAP.items():
         for v in vals:
-            v_norm = normalize_for_matching(v)
-            if v_norm and v_norm in t:
+            pattern = build_flexible_pattern(v)
+            if pattern and re.search(pattern, t):
                 found.append(intent)
                 break
 
@@ -438,7 +430,7 @@ def source_tier(platform, author, subs=0):
     if platform == "YouTube":
         if subs >= 1000000:
             return "Top Creator"
-        elif subs >= 100000:
+        if subs >= 100000:
             return "Mid Creator"
         return "Emerging Creator"
 
@@ -455,9 +447,9 @@ def compute_influence(row):
     base = safe_log1p(engagement)
     if platform == "YouTube":
         return round((base * 1.5) + (safe_log1p(subscribers) * 2.0), 3)
-    elif platform == "Indian Media":
+    if platform == "Indian Media":
         return round(base + 4.0, 3)
-    elif platform == "Direct Article":
+    if platform == "Direct Article":
         return round(base + 2.5, 3)
     return round(base, 3)
 
@@ -489,7 +481,7 @@ def generate_summary_insights(base_df, feature_df=None, pain_df=None):
     top_platform_neg = neg_df["Platform"].value_counts().idxmax() if not neg_df.empty else "N/A"
 
     top_source = "N/A"
-    if "Author" in base_df.columns and "Influence_Score" in base_df.columns and not base_df.empty:
+    if "Author" in base_df.columns and "Influence_Score" in base_df.columns:
         src = base_df.groupby("Author")["Influence_Score"].sum().sort_values(ascending=False)
         if not src.empty:
             top_source = src.index[0]
@@ -627,7 +619,6 @@ def get_video_metadata(api_key, video_ids):
             "Channel Name", "Subscribers", "Video Title", "Video ID",
             "Video Published At", "Video Views", "Video Likes"
         ]]
-
     except Exception:
         return pd.DataFrame()
 
@@ -666,7 +657,6 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
                         "Engagement": int(snippet.get("likeCount", 0))
                     })
                     extracted += 1
-
                     if extracted >= max_comments_per_video:
                         break
 
@@ -704,7 +694,7 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
                 media_data.append({
                     "Date": getattr(entry, "published", None),
                     "Platform": "Indian Media",
-                    "Author": entry.source.title if hasattr(entry, "source") else "News Outlet",
+                    "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
                     "Content": full_content[:2000],
                     "Engagement": np.nan
                 })
@@ -795,14 +785,14 @@ with st.sidebar:
     master_query = st.text_input("🎯 Target Product / Query", value="Samsung S26 Ultra")
 
     st.markdown("#### ➕ Custom Feature Tracking")
-    st.caption("Add one keyword or phrase at a time. Added items appear below as visible tags.")
+    st.caption("Added keywords always appear in the Feature / Topic filter list, even when no rows matched them yet.")
 
     cf1, cf2 = st.columns([3, 1])
     with cf1:
         st.text_input(
             "Custom feature input",
             key="custom_feature_input",
-            placeholder="e.g., Installation, Battery Drain, App Crash, 10-Bit",
+            placeholder="e.g., Installation, Drain, App Crash, 10-Bit",
             label_visibility="collapsed",
             on_change=add_custom_feature
         )
@@ -870,6 +860,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    show_debug = st.checkbox("Show debug", value=False)
     run_pipeline = st.button("🚀 Run Intelligence Pipeline", use_container_width=True)
 
 custom_topics_tuple = tuple(st.session_state["custom_feature_tags"])
@@ -969,6 +960,11 @@ raw_df = st.session_state["live_data"].copy()
 if not raw_df.empty:
     feature_df, pain_df, intent_df = explode_for_analysis(raw_df)
 
+    # Ensure custom features always appear in filter list
+    detected_features = sorted(feature_df["Feature"].dropna().unique().tolist())
+    custom_features = [x.strip() for x in st.session_state["custom_feature_tags"] if x.strip()]
+    all_feature_options = sorted(set(detected_features + custom_features), key=lambda x: x.lower())
+
     with st.container():
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🔍 Intelligence Filters")
@@ -985,8 +981,8 @@ if not raw_df.empty:
         with filter_col2:
             selected_feature = st.multiselect(
                 "Feature / Topic",
-                sorted(feature_df["Feature"].dropna().unique().tolist()),
-                default=sorted(feature_df["Feature"].dropna().unique().tolist())
+                all_feature_options,
+                default=all_feature_options
             )
 
         with filter_col3:
@@ -1012,7 +1008,6 @@ if not raw_df.empty:
     ].copy()
 
     allowed_base_ids = set(filtered_feature_df.index.tolist())
-
     filtered_df = raw_df.loc[raw_df.index.isin(allowed_base_ids)].copy()
 
     filtered_intent_df = intent_df[
@@ -1028,10 +1023,35 @@ if not raw_df.empty:
     filtered_intent_df = filtered_intent_df.loc[filtered_intent_df.index.isin(filtered_df.index)].copy()
 
 else:
+    feature_df = pd.DataFrame()
+    pain_df = pd.DataFrame()
+    intent_df = pd.DataFrame()
     filtered_df = pd.DataFrame()
     filtered_feature_df = pd.DataFrame()
     filtered_pain_df = pd.DataFrame()
     filtered_intent_df = pd.DataFrame()
+    all_feature_options = st.session_state["custom_feature_tags"]
+
+# =========================================================
+# DEBUG
+# =========================================================
+if show_debug:
+    with st.expander("Debug: Custom feature detection"):
+        st.write("Tracked custom features:", list(custom_topics_tuple))
+        if not feature_df.empty:
+            st.write("Detected features in data:", sorted(feature_df["Feature"].dropna().unique().tolist()))
+            st.write("Feature filter options:", all_feature_options)
+
+        if not raw_df.empty and custom_topics_tuple:
+            debug_hits = raw_df[
+                raw_df["Feature_List"].apply(
+                    lambda x: any(f in x for f in custom_topics_tuple) if isinstance(x, list) else False
+                )
+            ][["Platform", "Author", "Content", "Feature_List"]]
+
+            st.write(f"Rows matched by custom features: {len(debug_hits)}")
+            if not debug_hits.empty:
+                st.dataframe(debug_hits.head(20), use_container_width=True)
 
 # =========================================================
 # DASHBOARD
@@ -1233,7 +1253,7 @@ if not filtered_df.empty:
                 )
                 st.plotly_chart(fig_topic, use_container_width=True)
             else:
-                st.info("No feature data available.")
+                st.info("No feature data available for the current selection.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         with fc2:
@@ -1271,6 +1291,24 @@ if not filtered_df.empty:
                     0
                 )
 
+                # Add custom features with zero rows if selected but unmatched
+                existing_features = set(feat_summary["Feature"].astype(str).tolist())
+                missing_custom = [f for f in custom_features if f in selected_feature and f not in existing_features]
+                if missing_custom:
+                    zero_rows = pd.DataFrame({
+                        "Feature": missing_custom,
+                        "Mentions": 0,
+                        "Avg_Sentiment": 0.0,
+                        "Weighted_Sentiment": 0.0,
+                        "Weighted_Reach": 0.0,
+                        "Positive": 0,
+                        "Neutral": 0,
+                        "Negative": 0,
+                        "Positive %": 0.0,
+                        "Negative %": 0.0
+                    })
+                    feat_summary = pd.concat([feat_summary, zero_rows], ignore_index=True)
+
                 feat_summary = feat_summary.sort_values(["Mentions", "Weighted_Reach"], ascending=[False, False])
 
                 st.dataframe(
@@ -1282,7 +1320,21 @@ if not filtered_df.empty:
                     height=420
                 )
             else:
-                st.info("No feature summary available.")
+                # Show zero rows for selected custom features
+                missing_custom = [f for f in custom_features if f in selected_feature]
+                if missing_custom:
+                    zero_rows = pd.DataFrame({
+                        "Feature": missing_custom,
+                        "Mentions": 0,
+                        "Positive %": 0.0,
+                        "Negative %": 0.0,
+                        "Avg_Sentiment": 0.0,
+                        "Weighted_Sentiment": 0.0,
+                        "Weighted_Reach": 0.0
+                    })
+                    st.dataframe(zero_rows, use_container_width=True, height=220)
+                else:
+                    st.info("No feature summary available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -1529,4 +1581,7 @@ if not filtered_df.empty:
             st.info("No tracked YouTube source vault yet. Enable YouTube scraping and run the pipeline.")
 
 else:
-    st.info("👈 Configure your target in the sidebar and run the intelligence pipeline.")
+    if st.session_state["custom_feature_tags"]:
+        st.info("👈 Run the pipeline. Your custom keywords are already stored and will appear in Feature / Topic once data is loaded.")
+    else:
+        st.info("👈 Configure your target in the sidebar and run the intelligence pipeline.")
