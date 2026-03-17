@@ -16,65 +16,25 @@ from bs4 import BeautifulSoup
 # ==========================================
 st.set_page_config(page_title="Omnichannel Intelligence", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
-# --- ENTERPRISE CSS INJECTION ---
 st.markdown("""
 <style>
-    /* Main Background */
-    .stApp {
-        background-color: #0B0F19;
-    }
-    
-    /* Typography */
+    .stApp { background-color: #0B0F19; }
     h1, h2, h3 { color: #F3F4F6 !important; font-family: 'Inter', sans-serif; font-weight: 600; }
     p, span, div { color: #9CA3AF; font-family: 'Inter', sans-serif; }
-    
-    /* Sidebar Styling */
-    [data-testid="stSidebar"] {
-        background-color: #111827;
-        border-right: 1px solid #1F2937;
-    }
-    
-    /* Metric Cards Styling */
-    div[data-testid="metric-container"] {
-        background-color: #111827;
-        border: 1px solid #1F2937;
-        padding: 15px 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        transition: transform 0.2s;
-    }
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-2px);
-        border-color: #374151;
-    }
+    [data-testid="stSidebar"] { background-color: #111827; border-right: 1px solid #1F2937; }
+    div[data-testid="metric-container"] { background-color: #111827; border: 1px solid #1F2937; padding: 15px 20px; border-radius: 10px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); transition: transform 0.2s; }
+    div[data-testid="metric-container"]:hover { transform: translateY(-2px); border-color: #374151; }
     div[data-testid="metric-container"] label { color: #9CA3AF !important; }
     div[data-testid="metric-container"] div { color: #F3F4F6 !important; }
-    
-    /* Expander Styling */
-    .streamlit-expanderHeader {
-        background-color: #111827 !important;
-        border-radius: 8px !important;
-        border: 1px solid #1F2937 !important;
-        color: #F3F4F6 !important;
-    }
-    
-    /* Dataframe Styling */
+    .streamlit-expanderHeader { background-color: #111827 !important; border-radius: 8px !important; border: 1px solid #1F2937 !important; color: #F3F4F6 !important; }
     .stDataFrame { border-radius: 8px; overflow: hidden; border: 1px solid #1F2937; }
-    
-    /* Clean up default Streamlit elements - Sidebar arrow restored! */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {background-color: transparent !important;}
-    
-    /* Custom divider */
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {background-color: transparent !important;}
     hr { border-color: #1F2937 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Premium Color Palette for Charts
 PREMIUM_COLORS = {'Positive': '#10B981', 'Neutral': '#6B7280', 'Negative': '#EF4444'}
 
-# Initialize Incremental Vault
 if 'yt_db' not in st.session_state: st.session_state['yt_db'] = pd.DataFrame()
 if 'sources_db' not in st.session_state: st.session_state['sources_db'] = pd.DataFrame()
 
@@ -112,18 +72,15 @@ def get_video_metadata(api_key, video_ids):
             for item in vid_response.get('items', []):
                 ch_id = item['snippet']['channelId']
                 video_metadata.append({
-                    "Video ID": item['id'],
-                    "Video Title": item['snippet']['title'],
-                    "Channel Name": item['snippet']['channelTitle'],
-                    "Channel ID": ch_id
+                    "Video ID": item['id'], "Video Title": item['snippet']['title'],
+                    "Channel Name": item['snippet']['channelTitle'], "Channel ID": ch_id
                 })
                 channel_ids.append(ch_id)
                 
         if channel_ids:
             sub_data = {}
-            unique_channels = list(set(channel_ids))
-            for i in range(0, len(unique_channels), 50):
-                ch_chunk = unique_channels[i:i+50]
+            for i in range(0, len(list(set(channel_ids))), 50):
+                ch_chunk = list(set(channel_ids))[i:i+50]
                 ch_request = youtube.channels().list(part="statistics", id=",".join(ch_chunk))
                 ch_response = ch_request.execute()
                 for item in ch_response.get('items', []):
@@ -148,12 +105,9 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
                 for item in response.get('items', []):
                     snippet = item['snippet']['topLevelComment']['snippet']
                     comments_data.append({
-                        "Video ID": vid_id, 
-                        "Date": snippet['publishedAt'],
-                        "Platform": "YouTube",
+                        "Video ID": vid_id, "Date": snippet['publishedAt'], "Platform": "YouTube",
                         "Author": snippet.get('authorDisplayName', 'Anonymous'),
-                        "Content": snippet['textDisplay'],
-                        "Engagement": int(snippet.get('likeCount', 0))
+                        "Content": snippet['textDisplay'], "Engagement": int(snippet.get('likeCount', 0))
                     })
                     extracted += 1
                 if 'nextPageToken' in response:
@@ -163,16 +117,19 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
     return pd.DataFrame(comments_data)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_media_data(query, manual_urls=""):
+def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
     media_data = []
     headers = {'User-Agent': 'Mozilla/5.0'}
 
     if query:
         try:
-            safe_query = urllib.parse.quote(query)
+            # Inject time operator into Google News query (e.g., when:7d)
+            search_query = f"{query} when:{time_filter}" if time_filter else query
+            safe_query = urllib.parse.quote(search_query)
             url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
             feed = feedparser.parse(url)
-            for entry in feed.entries[:100]: 
+            
+            for entry in feed.entries[:max_articles]: 
                 summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, 'summary') else ""
                 full_content = f"{entry.title}. {summary_text}"
                 media_data.append({
@@ -241,40 +198,61 @@ st.sidebar.markdown("<p style='font-size: 14px; margin-bottom: 20px;'>Data inges
 
 try: api_key = st.secrets["YOUTUBE_API_KEY"]
 except KeyError:
-    st.sidebar.error("⚠️ API Key missing from Streamlit Secrets!")
     api_key = None
 
-master_query = st.sidebar.text_input("🎯 Target Product (Auto-Hunt)", value="Samsung S26 Ultra")
-manual_yt_urls = st.sidebar.text_area("🎥 Inject YouTube Links", placeholder="Paste URLs here...")
-manual_news_urls = st.sidebar.text_area("📰 Inject Media Articles", placeholder="Paste URLs here, separated by commas...")
+# --- MEDIA SECTION (UNLIMITED) ---
+st.sidebar.markdown("### 📰 Media Intelligence (Free/Unlimited)")
+master_query = st.sidebar.text_input("🎯 Target Product", value="Samsung S26 Ultra")
+
+time_map = {"Past 24 Hours": "1d", "Past 7 Days": "7d", "Past 30 Days": "30d", "Past Year": "1y", "Any Time": ""}
+selected_time = st.sidebar.selectbox("⏱️ Article Time Period", list(time_map.keys()), index=1)
+max_articles = st.sidebar.slider("📄 Articles to Scrape", min_value=10, max_value=100, value=50, step=10)
+manual_news_urls = st.sidebar.text_area("📰 Inject Specific Articles", placeholder="Paste URLs here, separated by commas...")
+
+st.sidebar.markdown("---")
+
+# --- YOUTUBE SECTION (QUOTA LIMITED) ---
+st.sidebar.markdown("### 🎥 YouTube Intelligence (Quota Limited)")
+enable_youtube = st.sidebar.checkbox("Enable YouTube Scraping", value=False)
+manual_yt_urls = st.sidebar.text_area("🎥 Inject Specific Videos", placeholder="Paste URLs here...")
 
 if st.sidebar.button("🚀 Run Enterprise Extraction", use_container_width=True):
-    if not api_key: st.error("Cannot run without YouTube API key.")
-    else:
-        with st.spinner("Executing pipeline..."):
-            
-            auto_video_ids = auto_discover_videos(api_key, master_query, max_videos=10)
-            manual_video_ids = extract_video_ids_from_text(manual_yt_urls)
-            all_requested_ids = list(set(auto_video_ids + manual_video_ids))
-            
-            existing_ids = st.session_state['yt_db']['Video ID'].unique().tolist() if not st.session_state['yt_db'].empty else []
-            new_ids_to_fetch = [vid for vid in all_requested_ids if vid not in existing_ids]
-            
-            if new_ids_to_fetch:
-                new_sources_df = get_video_metadata(api_key, new_ids_to_fetch)
-                new_yt_df = fetch_live_youtube_data(api_key, new_ids_to_fetch)
-                st.session_state['sources_db'] = pd.concat([st.session_state['sources_db'], new_sources_df], ignore_index=True)
-                st.session_state['yt_db'] = pd.concat([st.session_state['yt_db'], new_yt_df], ignore_index=True)
-                st.toast(f"✅ Fetched {len(new_ids_to_fetch)} new videos!")
-            else: st.toast("⚡ Using cached vault data to save API Quota.")
-
-            media_df = fetch_live_media_data(master_query, manual_news_urls)
-            combined_df = pd.concat([st.session_state['yt_db'], media_df], ignore_index=True)
-            
-            if not combined_df.empty:
-                st.session_state['live_data'] = process_nlp(combined_df)
-                st.success("Pipeline Execution Complete!")
-            else: st.warning("No data returned.")
+    with st.spinner("Executing pipeline..."):
+        
+        # 1. FETCH MEDIA (Always runs)
+        st.toast("📰 Scraping media articles...")
+        media_df = fetch_live_media_data(master_query, time_map[selected_time], max_articles, manual_news_urls)
+        
+        # 2. FETCH YOUTUBE (Only if toggled and Key exists)
+        yt_df = pd.DataFrame()
+        if enable_youtube:
+            if not api_key:
+                st.sidebar.error("⚠️ YouTube API Key missing from Secrets. Skipping YouTube.")
+            else:
+                st.toast("🎥 Scraping YouTube data...")
+                auto_video_ids = auto_discover_videos(api_key, master_query, max_videos=10)
+                manual_video_ids = extract_video_ids_from_text(manual_yt_urls)
+                all_requested_ids = list(set(auto_video_ids + manual_video_ids))
+                
+                existing_ids = st.session_state['yt_db']['Video ID'].unique().tolist() if not st.session_state['yt_db'].empty else []
+                new_ids_to_fetch = [vid for vid in all_requested_ids if vid not in existing_ids]
+                
+                if new_ids_to_fetch:
+                    new_sources_df = get_video_metadata(api_key, new_ids_to_fetch)
+                    new_yt_df = fetch_live_youtube_data(api_key, new_ids_to_fetch)
+                    st.session_state['sources_db'] = pd.concat([st.session_state['sources_db'], new_sources_df], ignore_index=True)
+                    st.session_state['yt_db'] = pd.concat([st.session_state['yt_db'], new_yt_df], ignore_index=True)
+                    st.toast(f"✅ Fetched {len(new_ids_to_fetch)} new videos!")
+                
+                yt_df = st.session_state['yt_db']
+        
+        # 3. COMBINE & PROCESS
+        combined_df = pd.concat([yt_df, media_df], ignore_index=True)
+        
+        if not combined_df.empty:
+            st.session_state['live_data'] = process_nlp(combined_df)
+            st.success("Pipeline Execution Complete!")
+        else: st.warning("No data returned.")
 
 # ==========================================
 # 5. DYNAMIC FILTERS 
@@ -296,14 +274,13 @@ if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
 else: filtered_df = pd.DataFrame()
 
 # ==========================================
-# 6. MAIN DASHBOARD UI (Premium Layout)
+# 6. MAIN DASHBOARD UI
 # ==========================================
 st.markdown("<h1 style='text-align: left; margin-bottom: 0;'>📡 Omnichannel Intelligence</h1>", unsafe_allow_html=True)
 st.markdown("<p style='font-size: 16px; margin-bottom: 30px;'>Real-time consumer sentiment & category tracking.</p>", unsafe_allow_html=True)
 
 if not filtered_df.empty:
     
-    # --- KPI CARDS ---
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Mentions", f"{len(filtered_df):,}")
     col2.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}")
@@ -315,14 +292,11 @@ if not filtered_df.empty:
     col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- DATA SOURCES VAULT ---
-    if 'sources_db' in st.session_state and not st.session_state['sources_db'].empty:
-        with st.expander(f"📂 View Active Data Vault ({len(st.session_state['sources_db'])} Media Sources Tracked)"):
+    if 'sources_db' in st.session_state and not st.session_state['sources_db'].empty and 'YouTube' in filtered_df['Platform'].values:
+        with st.expander(f"📂 View Active Data Vault ({len(st.session_state['sources_db'])} Videos Tracked)"):
             st.dataframe(st.session_state['sources_db'], use_container_width=True)
             
     st.markdown("---")
-    
-    # --- CHARTS (Transparent & Styled) ---
     col_chart1, col_chart2 = st.columns(2)
     
     with col_chart1:
@@ -334,10 +308,8 @@ if not filtered_df.empty:
                 orientation='h', barmode='stack', color_discrete_map=PREMIUM_COLORS
             )
             fig_topic.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
-                font_color="#9CA3AF", margin=dict(l=0, r=0, t=30, b=0),
-                xaxis=dict(showgrid=True, gridcolor='#1F2937'),
-                yaxis=dict(showgrid=False)
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="#9CA3AF", 
+                margin=dict(l=0, r=0, t=30, b=0), xaxis=dict(showgrid=True, gridcolor='#1F2937'), yaxis=dict(showgrid=False)
             )
             st.plotly_chart(fig_topic, use_container_width=True)
 
@@ -350,24 +322,19 @@ if not filtered_df.empty:
                 orientation='h', barmode='stack', color_discrete_map=PREMIUM_COLORS
             )
             fig_platform.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
-                font_color="#9CA3AF", margin=dict(l=0, r=0, t=30, b=0),
-                xaxis=dict(showgrid=True, gridcolor='#1F2937'),
-                yaxis=dict(showgrid=False)
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="#9CA3AF", 
+                margin=dict(l=0, r=0, t=30, b=0), xaxis=dict(showgrid=True, gridcolor='#1F2937'), yaxis=dict(showgrid=False)
             )
             st.plotly_chart(fig_platform, use_container_width=True)
 
     st.markdown("---")
-    
-    # --- GROUND TRUTH TABLE ---
     st.markdown("### 💬 Filtered Ground Truth")
-    display_df = filtered_df[['Platform', 'Author', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
+    display_df = filtered_df[['Date', 'Platform', 'Author', 'Feature', 'Sentiment_Category', 'Content', 'Engagement']].sort_values(by='Date', ascending=False)
     
     def color_sentiment(val):
-        color = PREMIUM_COLORS.get(val, 'gray')
-        return f'color: {color}; font-weight: 500;'
+        return f"color: {PREMIUM_COLORS.get(val, 'gray')}; font-weight: 500;"
         
     st.dataframe(display_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=500)
 
 else:
-    st.info("👈 Enter your target product in the sidebar and execute the pipeline.")
+    st.info("👈 Configure your targets in the sidebar and execute the pipeline.")
