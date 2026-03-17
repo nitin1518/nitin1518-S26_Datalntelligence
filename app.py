@@ -12,15 +12,71 @@ import requests
 from bs4 import BeautifulSoup
 
 # ==========================================
-# 1. PAGE CONFIGURATION & STATE INIT
+# 1. PAGE CONFIGURATION & UI INJECTION
 # ==========================================
-st.set_page_config(page_title="Live Market Intelligence", page_icon="📡", layout="wide")
+st.set_page_config(page_title="Omnichannel Intelligence", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
-# Initialize the "Incremental Vault" to save API Quotas
-if 'yt_db' not in st.session_state:
-    st.session_state['yt_db'] = pd.DataFrame()
-if 'sources_db' not in st.session_state:
-    st.session_state['sources_db'] = pd.DataFrame()
+# --- ENTERPRISE CSS INJECTION ---
+st.markdown("""
+<style>
+    /* Main Background */
+    .stApp {
+        background-color: #0B0F19;
+    }
+    
+    /* Typography */
+    h1, h2, h3 { color: #F3F4F6 !important; font-family: 'Inter', sans-serif; font-weight: 600; }
+    p, span, div { color: #9CA3AF; font-family: 'Inter', sans-serif; }
+    
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background-color: #111827;
+        border-right: 1px solid #1F2937;
+    }
+    
+    /* Metric Cards Styling */
+    div[data-testid="metric-container"] {
+        background-color: #111827;
+        border: 1px solid #1F2937;
+        padding: 15px 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s;
+    }
+    div[data-testid="metric-container"]:hover {
+        transform: translateY(-2px);
+        border-color: #374151;
+    }
+    div[data-testid="metric-container"] label { color: #9CA3AF !important; }
+    div[data-testid="metric-container"] div { color: #F3F4F6 !important; }
+    
+    /* Expander Styling */
+    .streamlit-expanderHeader {
+        background-color: #111827 !important;
+        border-radius: 8px !important;
+        border: 1px solid #1F2937 !important;
+        color: #F3F4F6 !important;
+    }
+    
+    /* Dataframe Styling */
+    .stDataFrame { border-radius: 8px; overflow: hidden; border: 1px solid #1F2937; }
+    
+    /* Clean up default Streamlit elements */
+    header {visibility: hidden;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Custom divider */
+    hr { border-color: #1F2937 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# Premium Color Palette for Charts
+PREMIUM_COLORS = {'Positive': '#10B981', 'Neutral': '#6B7280', 'Negative': '#EF4444'}
+
+# Initialize Incremental Vault
+if 'yt_db' not in st.session_state: st.session_state['yt_db'] = pd.DataFrame()
+if 'sources_db' not in st.session_state: st.session_state['sources_db'] = pd.DataFrame()
 
 # ==========================================
 # 2. HYBRID EXTRACTION ENGINES
@@ -43,7 +99,6 @@ def auto_discover_videos(api_key, query, max_videos=10):
     except: return []
 
 def get_video_metadata(api_key, video_ids):
-    """Fetches metadata ONLY for new videos."""
     if not api_key or not video_ids: return pd.DataFrame()
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
@@ -80,7 +135,6 @@ def get_video_metadata(api_key, video_ids):
     except: return pd.DataFrame()
 
 def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
-    """Fetches comments ONLY for new videos."""
     if not api_key or not video_ids: return pd.DataFrame()
     youtube = build('youtube', 'v3', developerKey=api_key)
     comments_data = []
@@ -94,7 +148,7 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
                 for item in response.get('items', []):
                     snippet = item['snippet']['topLevelComment']['snippet']
                     comments_data.append({
-                        "Video ID": vid_id, # Track for incremental caching
+                        "Video ID": vid_id, 
                         "Date": snippet['publishedAt'],
                         "Platform": "YouTube",
                         "Author": snippet.get('authorDisplayName', 'Anonymous'),
@@ -110,54 +164,40 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_live_media_data(query, manual_urls=""):
-    """Deep Scraping: RSS Summaries + Direct Website Paragraph Extraction."""
     media_data = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. Google News RSS (Extracting deeper summaries, not just titles)
     if query:
         try:
             safe_query = urllib.parse.quote(query)
             url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
             feed = feedparser.parse(url)
             for entry in feed.entries[:100]: 
-                # Clean HTML from the summary
                 summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, 'summary') else ""
                 full_content = f"{entry.title}. {summary_text}"
-                
                 media_data.append({
-                    "Date": entry.published,
-                    "Platform": "Indian Media",
+                    "Date": entry.published, "Platform": "Indian Media",
                     "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
-                    "Content": full_content[:1000], # Truncate to keep NLP fast
-                    "Engagement": 500 
+                    "Content": full_content[:1000], "Engagement": 500 
                 })
-        except Exception as e:
-            st.warning(f"RSS Issue: {e}")
+        except: pass
 
-    # 2. Manual URL Deep Scraping
     if manual_urls:
         urls = [u.strip() for u in manual_urls.split(',') if u.strip().startswith('http')]
         for url in urls:
             try:
                 res = requests.get(url, headers=headers, timeout=5)
                 soup = BeautifulSoup(res.text, 'html.parser')
-                # Extract all paragraph text
                 paragraphs = soup.find_all('p')
                 article_text = ' '.join([p.get_text() for p in paragraphs])
                 title = soup.title.string if soup.title else "Manual Article"
-                
                 if article_text:
                     media_data.append({
                         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Platform": "Direct Article",
-                        "Author": urllib.parse.urlparse(url).netloc,
-                        "Content": f"{title}. {article_text[:1500]}", 
-                        "Engagement": 1000 
+                        "Platform": "Direct Article", "Author": urllib.parse.urlparse(url).netloc,
+                        "Content": f"{title}. {article_text[:1500]}", "Engagement": 1000 
                     })
-            except:
-                st.warning(f"Could not scrape contents of: {url}")
-
+            except: pass
     return pd.DataFrame(media_data)
 
 # ==========================================
@@ -196,66 +236,57 @@ def process_nlp(df):
 # ==========================================
 # 4. SIDEBAR & EXTRACTION TRIGGER
 # ==========================================
-st.sidebar.title("⚙️ Live Extraction Engine")
+st.sidebar.markdown("<h2 style='color: white; margin-bottom: 0;'>⚙️ Extraction Engine</h2>", unsafe_allow_html=True)
+st.sidebar.markdown("<p style='font-size: 14px; margin-bottom: 20px;'>Data ingestion & NLP controls.</p>", unsafe_allow_html=True)
 
 try: api_key = st.secrets["YOUTUBE_API_KEY"]
 except KeyError:
     st.sidebar.error("⚠️ API Key missing from Streamlit Secrets!")
     api_key = None
 
-master_query = st.sidebar.text_input("1. Target Product (Auto-Hunt)", value="Samsung S26 Ultra")
-manual_yt_urls = st.sidebar.text_area("2. Inject YouTube Links (Optional)", placeholder="Paste YouTube URLs here...")
-manual_news_urls = st.sidebar.text_area("3. Inject Media Articles (Optional)", placeholder="Paste news article URLs here, separated by commas...")
+master_query = st.sidebar.text_input("🎯 Target Product (Auto-Hunt)", value="Samsung S26 Ultra")
+manual_yt_urls = st.sidebar.text_area("🎥 Inject YouTube Links", placeholder="Paste URLs here...")
+manual_news_urls = st.sidebar.text_area("📰 Inject Media Articles", placeholder="Paste URLs here, separated by commas...")
 
-if st.sidebar.button("🚀 Run Incremental Extraction"):
+if st.sidebar.button("🚀 Run Enterprise Extraction", use_container_width=True):
     if not api_key: st.error("Cannot run without YouTube API key.")
     else:
-        with st.spinner("Extracting new data and skipping duplicates..."):
+        with st.spinner("Executing pipeline..."):
             
-            # --- 1. INCREMENTAL YOUTUBE LOGIC ---
             auto_video_ids = auto_discover_videos(api_key, master_query, max_videos=10)
             manual_video_ids = extract_video_ids_from_text(manual_yt_urls)
             all_requested_ids = list(set(auto_video_ids + manual_video_ids))
             
-            # Check what we already have in the vault
             existing_ids = st.session_state['yt_db']['Video ID'].unique().tolist() if not st.session_state['yt_db'].empty else []
             new_ids_to_fetch = [vid for vid in all_requested_ids if vid not in existing_ids]
             
             if new_ids_to_fetch:
                 new_sources_df = get_video_metadata(api_key, new_ids_to_fetch)
                 new_yt_df = fetch_live_youtube_data(api_key, new_ids_to_fetch)
-                
-                # Update the Vault
                 st.session_state['sources_db'] = pd.concat([st.session_state['sources_db'], new_sources_df], ignore_index=True)
                 st.session_state['yt_db'] = pd.concat([st.session_state['yt_db'], new_yt_df], ignore_index=True)
-                st.toast(f"✅ Fetched {len(new_ids_to_fetch)} brand new videos!")
-            else:
-                st.toast("⚡ No new videos detected. Using cached data to save API Quota!")
+                st.toast(f"✅ Fetched {len(new_ids_to_fetch)} new videos!")
+            else: st.toast("⚡ Using cached vault data to save API Quota.")
 
-            # --- 2. DEEP MEDIA LOGIC ---
-            # Media is faster, we fetch this live to ensure we get breaking news
             media_df = fetch_live_media_data(master_query, manual_news_urls)
-            
-            # --- 3. COMBINE & NLP PROCESS ---
             combined_df = pd.concat([st.session_state['yt_db'], media_df], ignore_index=True)
             
             if not combined_df.empty:
                 st.session_state['live_data'] = process_nlp(combined_df)
                 st.success("Pipeline Execution Complete!")
-            else:
-                st.warning("No data returned.")
+            else: st.warning("No data returned.")
 
 # ==========================================
 # 5. DYNAMIC FILTERS 
 # ==========================================
 st.sidebar.markdown("---")
-st.sidebar.title("🔍 Data Filters")
+st.sidebar.markdown("<h2 style='color: white; margin-bottom: 0;'>🔍 Data Filters</h2>", unsafe_allow_html=True)
 
 if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
     df = st.session_state['live_data']
     selected_platform = st.sidebar.multiselect("📡 Platform", df['Platform'].unique(), default=df['Platform'].unique())
     selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
-    selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
+    selected_sentiment = st.sidebar.multiselect("🎭 Sentiment", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
     
     filtered_df = df[
         (df['Platform'].isin(selected_platform)) &
@@ -265,61 +296,78 @@ if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
 else: filtered_df = pd.DataFrame()
 
 # ==========================================
-# 6. MAIN DASHBOARD UI
+# 6. MAIN DASHBOARD UI (Premium Layout)
 # ==========================================
-st.title("📡 Live Omnichannel Intelligence")
-st.markdown("Automated Category Leadership Dashboard tracking real-time market sentiment.")
+st.markdown("<h1 style='text-align: left; margin-bottom: 0;'>📡 Omnichannel Intelligence</h1>", unsafe_allow_html=True)
+st.markdown("<p style='font-size: 16px; margin-bottom: 30px;'>Real-time consumer sentiment & category tracking.</p>", unsafe_allow_html=True)
 
 if not filtered_df.empty:
     
+    # --- KPI CARDS ---
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Filtered Mentions", f"{len(filtered_df):,}")
-    col2.metric("Filtered Engagement", f"{filtered_df['Engagement'].sum():,}")
+    col1.metric("Total Mentions", f"{len(filtered_df):,}")
+    col2.metric("Total Engagement", f"{filtered_df['Engagement'].sum():,}")
     
     pct_negative = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Negative']) / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
     pct_positive = (len(filtered_df[filtered_df['Sentiment_Category'] == 'Positive']) / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
     
     col3.metric("🔥 Negative Share", f"{pct_negative:.1f}%")
     col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%")
-    st.markdown("---")
+    st.markdown("<br>", unsafe_allow_html=True)
 
+    # --- DATA SOURCES VAULT ---
     if 'sources_db' in st.session_state and not st.session_state['sources_db'].empty:
-        with st.expander(f"🎥 Tracked YouTube Channels ({len(st.session_state['sources_db'])} Videos in Vault)"):
+        with st.expander(f"📂 View Active Data Vault ({len(st.session_state['sources_db'])} Media Sources Tracked)"):
             st.dataframe(st.session_state['sources_db'], use_container_width=True)
             
     st.markdown("---")
+    
+    # --- CHARTS (Transparent & Styled) ---
     col_chart1, col_chart2 = st.columns(2)
     
     with col_chart1:
-        st.subheader("1. Topic Polarization")
+        st.markdown("### Topic Polarization Matrix")
         topic_breakdown = filtered_df.groupby(['Feature', 'Sentiment_Category']).size().reset_index(name='Count')
         if not topic_breakdown.empty:
             fig_topic = px.bar(
                 topic_breakdown, x='Count', y='Feature', color='Sentiment_Category', 
-                orientation='h', barmode='stack', template="plotly_dark",
-                color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
+                orientation='h', barmode='stack', color_discrete_map=PREMIUM_COLORS
             )
-            fig_topic.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+            fig_topic.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
+                font_color="#9CA3AF", margin=dict(l=0, r=0, t=30, b=0),
+                xaxis=dict(showgrid=True, gridcolor='#1F2937'),
+                yaxis=dict(showgrid=False)
+            )
             st.plotly_chart(fig_topic, use_container_width=True)
 
     with col_chart2:
-        st.subheader("2. Platform Health")
+        st.markdown("### Platform Health Distribution")
         platform_breakdown = filtered_df.groupby(['Platform', 'Sentiment_Category']).size().reset_index(name='Count')
         if not platform_breakdown.empty:
             fig_platform = px.bar(
                 platform_breakdown, x='Count', y='Platform', color='Sentiment_Category', 
-                orientation='h', barmode='stack', template="plotly_dark",
-                color_discrete_map={'Positive': '#2ecc71', 'Neutral': '#95a5a6', 'Negative': '#e74c3c'}
+                orientation='h', barmode='stack', color_discrete_map=PREMIUM_COLORS
             )
-            fig_platform.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+            fig_platform.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
+                font_color="#9CA3AF", margin=dict(l=0, r=0, t=30, b=0),
+                xaxis=dict(showgrid=True, gridcolor='#1F2937'),
+                yaxis=dict(showgrid=False)
+            )
             st.plotly_chart(fig_platform, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("💬 Filtered Ground Truth (Raw Verbatims)")
+    
+    # --- GROUND TRUTH TABLE ---
+    st.markdown("### 💬 Filtered Ground Truth")
     display_df = filtered_df[['Platform', 'Author', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
     
     def color_sentiment(val):
-        color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
-        return f'color: {color}'
+        color = PREMIUM_COLORS.get(val, 'gray')
+        return f'color: {color}; font-weight: 500;'
         
     st.dataframe(display_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=500)
+
+else:
+    st.info("👈 Enter your target product in the sidebar and execute the pipeline.")
