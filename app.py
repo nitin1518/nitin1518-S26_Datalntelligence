@@ -215,6 +215,18 @@ st.markdown("""
         font-size: 0.88rem;
         margin-bottom: 1rem;
     }
+
+    .tag-chip {
+        display: inline-block;
+        background: rgba(56,189,248,0.14);
+        color: #E0F2FE;
+        border: 1px solid rgba(56,189,248,0.28);
+        padding: 6px 10px;
+        margin: 4px 6px 0 0;
+        border-radius: 999px;
+        font-size: 0.80rem;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -295,6 +307,12 @@ if "sources_db" not in st.session_state:
 if "live_data" not in st.session_state:
     st.session_state["live_data"] = pd.DataFrame()
 
+if "custom_feature_tags" not in st.session_state:
+    st.session_state["custom_feature_tags"] = []
+
+if "custom_feature_input" not in st.session_state:
+    st.session_state["custom_feature_input"] = ""
+
 # =========================================================
 # UTILITY FUNCTIONS
 # =========================================================
@@ -353,7 +371,6 @@ def get_features(text, custom_list):
     t = str(text).lower()
     matched = []
 
-    # Custom features
     for custom_feat in custom_list:
         feat = custom_feat.strip()
         if not feat:
@@ -363,7 +380,6 @@ def get_features(text, custom_list):
         if feat_words and all(word in t for word in feat_words):
             matched.append(feat)
 
-    # Built-in features
     for feature, keywords in FEATURE_MAP.items():
         if any(k in t for k in keywords):
             matched.append(feature)
@@ -476,6 +492,18 @@ def compare_recent_vs_previous(df, dimension_col, recent_days=7):
         np.where(out["Recent_Count"] > 0, 100.0, 0.0)
     )
     return out.sort_values("Growth_%", ascending=False)
+
+def add_custom_feature():
+    feat = st.session_state.get("custom_feature_input", "").strip()
+    if feat:
+        existing_lower = [x.lower() for x in st.session_state["custom_feature_tags"]]
+        if feat.lower() not in existing_lower:
+            st.session_state["custom_feature_tags"].append(feat)
+        st.session_state["custom_feature_input"] = ""
+
+def remove_custom_feature(idx):
+    if 0 <= idx < len(st.session_state["custom_feature_tags"]):
+        st.session_state["custom_feature_tags"].pop(idx)
 
 # =========================================================
 # EXTRACTION HELPERS
@@ -672,11 +700,11 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
 # NLP PIPELINE
 # =========================================================
 @st.cache_data(show_spinner=False)
-def process_nlp(df, custom_topics_str):
+def process_nlp(df, custom_topics_tuple):
     if df.empty:
         return df
 
-    custom_list = [x.strip() for x in custom_topics_str.split(",")] if custom_topics_str else []
+    custom_list = list(custom_topics_tuple) if custom_topics_tuple else []
 
     df = dedupe_dataframe(df)
     df = parse_dates(df)
@@ -728,10 +756,34 @@ with st.sidebar:
     st.markdown('<div class="sidebar-caption">Configure product targets, sources, and feature tracking.</div>', unsafe_allow_html=True)
 
     master_query = st.text_input("🎯 Target Product / Query", value="Samsung S26 Ultra")
-    custom_topics = st.text_input(
-        "➕ Custom Feature Tracking",
-        placeholder="e.g., App, Installation, Heating, Battery Drain"
-    )
+
+    st.markdown("#### ➕ Custom Feature Tracking")
+    st.caption("Add one keyword or phrase at a time. Added items appear below as visible tags.")
+
+    cf1, cf2 = st.columns([3, 1])
+    with cf1:
+        st.text_input(
+            "Custom feature input",
+            key="custom_feature_input",
+            placeholder="e.g., Installation, Battery Drain, App Crash",
+            label_visibility="collapsed",
+            on_change=add_custom_feature
+        )
+    with cf2:
+        st.button("Add", use_container_width=True, on_click=add_custom_feature)
+
+    if st.session_state["custom_feature_tags"]:
+        st.markdown("**Tracked custom features**")
+        for idx, feat in enumerate(st.session_state["custom_feature_tags"]):
+            rc1, rc2 = st.columns([4, 1])
+            with rc1:
+                st.markdown(f'<span class="tag-chip">{feat}</span>', unsafe_allow_html=True)
+            with rc2:
+                st.button("✕", key=f"remove_cf_{idx}", on_click=remove_custom_feature, args=(idx,))
+    else:
+        st.caption("No custom features added yet.")
+
+    st.markdown("---")
 
     time_map = {
         "Past 24 Hours": "1d",
@@ -783,6 +835,8 @@ with st.sidebar:
     st.markdown("---")
     run_pipeline = st.button("🚀 Run Intelligence Pipeline", use_container_width=True)
 
+custom_topics_tuple = tuple(st.session_state["custom_feature_tags"])
+
 # =========================================================
 # EXTRACTION TRIGGER
 # =========================================================
@@ -797,7 +851,6 @@ if run_pipeline:
         )
 
         yt_df = pd.DataFrame()
-        sources_df = pd.DataFrame()
 
         if enable_youtube:
             if not api_key:
@@ -838,12 +891,11 @@ if run_pipeline:
                         )
 
                 yt_df = st.session_state["yt_db"].copy()
-                sources_df = st.session_state["sources_db"].copy()
 
         combined_df = pd.concat([yt_df, media_df], ignore_index=True)
 
         if not combined_df.empty:
-            processed = process_nlp(combined_df, custom_topics)
+            processed = process_nlp(combined_df, custom_topics_tuple)
             st.session_state["live_data"] = processed
             st.success("Pipeline execution complete.")
         else:
@@ -1026,9 +1078,6 @@ if not filtered_df.empty:
         "🎥 Active Video Vault"
     ])
 
-    # =====================================================
-    # TAB 1 - TRENDS
-    # =====================================================
     with tabs[0]:
         tc1, tc2 = st.columns(2)
 
@@ -1116,9 +1165,6 @@ if not filtered_df.empty:
                 st.info("Not enough dated pain-point data to compute growth.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 2 - FEATURE INTELLIGENCE
-    # =====================================================
     with tabs[1]:
         fc1, fc2 = st.columns(2)
 
@@ -1233,9 +1279,6 @@ if not filtered_df.empty:
             st.info("No heatmap data available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 3 - PAIN POINT RADAR
-    # =====================================================
     with tabs[2]:
         pc1, pc2 = st.columns(2)
 
@@ -1318,9 +1361,6 @@ if not filtered_df.empty:
             st.info("No negative pain-point scorecard available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 4 - INTENT & PLATFORM
-    # =====================================================
     with tabs[3]:
         ic1, ic2 = st.columns(2)
 
@@ -1390,9 +1430,6 @@ if not filtered_df.empty:
             st.info("No intent-sentiment matrix available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 5 - SOURCE INFLUENCE
-    # =====================================================
     with tabs[4]:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### Source Influence Leaderboard")
@@ -1413,9 +1450,6 @@ if not filtered_df.empty:
         st.dataframe(source_table, use_container_width=True, height=450)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 6 - GROUND TRUTH
-    # =====================================================
     with tabs[5]:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 💬 Filtered Ground Truth Explorer")
@@ -1448,9 +1482,6 @@ if not filtered_df.empty:
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================
-    # TAB 7 - ACTIVE VIDEO VAULT
-    # =====================================================
     with tabs[6]:
         if "sources_db" in st.session_state and not st.session_state["sources_db"].empty:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
