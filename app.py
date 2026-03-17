@@ -117,13 +117,13 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
     return pd.DataFrame(comments_data)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
+def fetch_live_media_data(query, time_filter, max_articles, manual_urls="", deep_scrape=False):
     media_data = []
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
+    # 1. Google News Aggregator (Pulls from thousands of free sources)
     if query:
         try:
-            # Inject time operator into Google News query (e.g., when:7d)
             search_query = f"{query} when:{time_filter}" if time_filter else query
             safe_query = urllib.parse.quote(search_query)
             url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
@@ -132,13 +132,29 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
             for entry in feed.entries[:max_articles]: 
                 summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, 'summary') else ""
                 full_content = f"{entry.title}. {summary_text}"
+                
+                # DEEP SCRAPE LOGIC: Visit the actual website
+                if deep_scrape:
+                    try:
+                        res = requests.get(entry.link, headers=headers, timeout=4)
+                        soup = BeautifulSoup(res.text, 'html.parser')
+                        paragraphs = soup.find_all('p')
+                        article_text = ' '.join([p.get_text() for p in paragraphs])
+                        # If we successfully extracted paragraph text, use it instead of the summary
+                        if len(article_text) > 200:
+                            # Cap at 2500 chars to keep NLP processing fast
+                            full_content = f"{entry.title}. {article_text[:2500]}" 
+                    except:
+                        pass # Silently fallback to the summary if the site blocks us
+                
                 media_data.append({
                     "Date": entry.published, "Platform": "Indian Media",
                     "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
-                    "Content": full_content[:1000], "Engagement": 500 
+                    "Content": full_content, "Engagement": 500 
                 })
         except: pass
 
+    # 2. Manual URL Deep Scraping
     if manual_urls:
         urls = [u.strip() for u in manual_urls.split(',') if u.strip().startswith('http')]
         for url in urls:
@@ -152,9 +168,10 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
                     media_data.append({
                         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "Platform": "Direct Article", "Author": urllib.parse.urlparse(url).netloc,
-                        "Content": f"{title}. {article_text[:1500]}", "Engagement": 1000 
+                        "Content": f"{title}. {article_text[:2500]}", "Engagement": 1000 
                     })
             except: pass
+            
     return pd.DataFrame(media_data)
 
 # ==========================================
@@ -167,11 +184,11 @@ def process_nlp(df):
 
     def get_feature(text):
         t = str(text).lower()
-        if any(w in t for w in ['screen', 'display', 'pixel', 'black', 'oled']): return 'Display/Screen'
+        if any(w in t for w in ['screen', 'display', 'pixel', 'black', 'oled', 'panel']): return 'Display/Screen'
         elif any(w in t for w in ['battery', 'drain', 'mah', 'charge', 'heating']): return 'Battery/Power'
-        elif any(w in t for w in ['price', 'overpriced', 'rs', 'cost', 'expensive']): return 'Price/Value'
-        elif any(w in t for w in ['exynos', 'snapdragon', 'thermal', 'lag', 'chip']): return 'Performance/Chip'
-        elif any(w in t for w in ['camera', 'zoom', 'lens', 'photo', 'video']): return 'Camera'
+        elif any(w in t for w in ['price', 'overpriced', 'rs', 'cost', 'expensive', 'budget']): return 'Price/Value'
+        elif any(w in t for w in ['exynos', 'snapdragon', 'thermal', 'lag', 'chip', 'performance']): return 'Performance/Chip'
+        elif any(w in t for w in ['camera', 'zoom', 'lens', 'photo', 'video', 'blur']): return 'Camera'
         return 'General/Other'
 
     def get_score(text):
@@ -181,7 +198,7 @@ def process_nlp(df):
         return TextBlob(str(text)).sentiment.polarity
         
     def get_category(score):
-        if score > 0.05: return 'Positive'
+        if score > 0.08: return 'Positive' # Adjusted threshold slightly to account for longer articles
         elif score < -0.05: return 'Negative'
         return 'Neutral'
 
@@ -201,12 +218,13 @@ except KeyError:
     api_key = None
 
 # --- MEDIA SECTION (UNLIMITED) ---
-st.sidebar.markdown("### 📰 Media Intelligence (Free/Unlimited)")
+st.sidebar.markdown("### 📰 Media Intelligence (Unlimited)")
 master_query = st.sidebar.text_input("🎯 Target Product", value="Samsung S26 Ultra")
 
 time_map = {"Past 24 Hours": "1d", "Past 7 Days": "7d", "Past 30 Days": "30d", "Past Year": "1y", "Any Time": ""}
 selected_time = st.sidebar.selectbox("⏱️ Article Time Period", list(time_map.keys()), index=1)
-max_articles = st.sidebar.slider("📄 Articles to Scrape", min_value=10, max_value=100, value=50, step=10)
+max_articles = st.sidebar.slider("📄 Articles to Scrape", min_value=10, max_value=100, value=30, step=10)
+deep_scrape_toggle = st.sidebar.checkbox("🔍 Deep Scraping (Extract Full Article Text)", value=True, help="Visits the website to read paragraphs, bypassing PR headlines. Slower but higher depth.")
 manual_news_urls = st.sidebar.text_area("📰 Inject Specific Articles", placeholder="Paste URLs here, separated by commas...")
 
 st.sidebar.markdown("---")
@@ -221,7 +239,7 @@ if st.sidebar.button("🚀 Run Enterprise Extraction", use_container_width=True)
         
         # 1. FETCH MEDIA (Always runs)
         st.toast("📰 Scraping media articles...")
-        media_df = fetch_live_media_data(master_query, time_map[selected_time], max_articles, manual_news_urls)
+        media_df = fetch_live_media_data(master_query, time_map[selected_time], max_articles, manual_news_urls, deep_scrape=deep_scrape_toggle)
         
         # 2. FETCH YOUTUBE (Only if toggled and Key exists)
         yt_df = pd.DataFrame()
