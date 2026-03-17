@@ -243,7 +243,7 @@ FEATURE_MAP = {
     "Connectivity": ["network", "wifi", "wi-fi", "bluetooth", "signal", "5g", "connection", "connected"],
     "Build/Design": ["design", "build", "premium", "weight", "feel", "body", "look", "finish"],
     "Audio/Speakers": ["speaker", "audio", "sound", "mic", "microphone", "volume"],
-    "Service/Installation": ["installation", "install", "service", "support", "technician", "customer care", "engineer"]
+    "Service/Installation": ["installation", "install", "service", "technician", "support", "customer care", "engineer"]
 }
 
 PAIN_POINT_MAP = {
@@ -353,11 +353,17 @@ def get_features(text, custom_list):
     t = str(text).lower()
     matched = []
 
+    # Custom features
     for custom_feat in custom_list:
         feat = custom_feat.strip()
-        if feat and feat.lower() in t:
-            matched.append(feat.title())
+        if not feat:
+            continue
 
+        feat_words = [w.strip() for w in feat.lower().split() if w.strip()]
+        if feat_words and all(word in t for word in feat_words):
+            matched.append(feat)
+
+    # Built-in features
     for feature, keywords in FEATURE_MAP.items():
         if any(k in t for k in keywords):
             matched.append(feature)
@@ -402,35 +408,38 @@ def compute_influence(row):
         return round(base + 2.5, 3)
     return round(base, 3)
 
-def generate_summary_insights(df):
+def generate_summary_insights(base_df, feature_df=None, pain_df=None):
     insights = []
-    if df.empty:
+    if base_df.empty:
         return insights
 
-    total = len(df)
-    neg_share = round((len(df[df["Sentiment_Category"] == "Negative"]) / total) * 100, 1) if total else 0
-    pos_share = round((len(df[df["Sentiment_Category"] == "Positive"]) / total) * 100, 1) if total else 0
+    total = len(base_df)
+    neg_share = round((len(base_df[base_df["Sentiment_Category"] == "Negative"]) / total) * 100, 1) if total else 0
+    pos_share = round((len(base_df[base_df["Sentiment_Category"] == "Positive"]) / total) * 100, 1) if total else 0
 
-    top_feature = (
-        df["Feature"].value_counts().idxmax()
-        if "Feature" in df.columns and not df["Feature"].dropna().empty else "N/A"
-    )
+    top_feature = "N/A"
+    if feature_df is not None and not feature_df.empty and "Feature" in feature_df.columns:
+        valid_features = feature_df["Feature"].dropna()
+        if not valid_features.empty:
+            top_feature = valid_features.value_counts().idxmax()
 
-    neg_df = df[df["Sentiment_Category"] == "Negative"]
-    top_pain = (
-        neg_df[neg_df["Pain_Point"] != "None"]["Pain_Point"].value_counts().idxmax()
-        if not neg_df.empty and not neg_df[neg_df["Pain_Point"] != "None"].empty else "No major pain point surfaced"
-    )
+    top_pain = "No major pain point surfaced"
+    if pain_df is not None and not pain_df.empty and "Pain_Point" in pain_df.columns:
+        neg_pain_df = pain_df[
+            (pain_df["Sentiment_Category"] == "Negative") &
+            (pain_df["Pain_Point"] != "None")
+        ]
+        if not neg_pain_df.empty:
+            top_pain = neg_pain_df["Pain_Point"].value_counts().idxmax()
 
-    top_platform_neg = (
-        neg_df["Platform"].value_counts().idxmax()
-        if not neg_df.empty else "N/A"
-    )
+    neg_df = base_df[base_df["Sentiment_Category"] == "Negative"]
+    top_platform_neg = neg_df["Platform"].value_counts().idxmax() if not neg_df.empty else "N/A"
 
-    top_source = (
-        df.groupby("Author")["Influence_Score"].sum().sort_values(ascending=False).index[0]
-        if not df.empty else "N/A"
-    )
+    top_source = "N/A"
+    if "Author" in base_df.columns and "Influence_Score" in base_df.columns and not base_df.empty:
+        src = base_df.groupby("Author")["Influence_Score"].sum().sort_values(ascending=False)
+        if not src.empty:
+            top_source = src.index[0]
 
     insights.append(f"Positive share is {pos_share}% while negative share is {neg_share}%.")
     insights.append(f"Most discussed feature is {top_feature}.")
@@ -699,6 +708,11 @@ def explode_for_analysis(df):
     feature_df = df.explode("Feature_List").rename(columns={"Feature_List": "Feature"})
     pain_df = df.explode("Pain_Point_List").rename(columns={"Pain_Point_List": "Pain_Point"})
     intent_df = df.explode("Intent_List").rename(columns={"Intent_List": "Intent"})
+
+    feature_df["Feature"] = feature_df["Feature"].astype(str).str.strip()
+    pain_df["Pain_Point"] = pain_df["Pain_Point"].astype(str).str.strip()
+    intent_df["Intent"] = intent_df["Intent"].astype(str).str.strip()
+
     return feature_df, pain_df, intent_df
 
 # =========================================================
@@ -965,14 +979,17 @@ if not filtered_df.empty:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Executive summary
     summary_col1, summary_col2 = st.columns([1.6, 1.0])
 
     with summary_col1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🧠 Executive Summary")
 
-        for insight in generate_summary_insights(filtered_feature_df):
+        for insight in generate_summary_insights(
+            filtered_df,
+            feature_df=filtered_feature_df,
+            pain_df=filtered_pain_df
+        ):
             st.markdown(f"""
             <div class="summary-box">
                 <div class="summary-title">Insight</div>
