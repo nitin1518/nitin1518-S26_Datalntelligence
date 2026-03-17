@@ -61,10 +61,10 @@ st.markdown("""
     /* Dataframe Styling */
     .stDataFrame { border-radius: 8px; overflow: hidden; border: 1px solid #1F2937; }
     
-    /* Clean up default Streamlit elements */
-    header {visibility: hidden;}
+    /* Clean up default Streamlit elements - Sidebar arrow restored! */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    header {background-color: transparent !important;}
     
     /* Custom divider */
     hr { border-color: #1F2937 !important; }
