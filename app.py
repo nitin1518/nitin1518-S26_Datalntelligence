@@ -64,7 +64,6 @@ def get_video_metadata(api_key, video_ids):
         youtube = build('youtube', 'v3', developerKey=api_key)
         video_metadata = []
         channel_ids = []
-        
         for i in range(0, len(video_ids), 50):
             chunk = video_ids[i:i+50]
             vid_request = youtube.videos().list(part="snippet", id=",".join(chunk))
@@ -76,7 +75,6 @@ def get_video_metadata(api_key, video_ids):
                     "Channel Name": item['snippet']['channelTitle'], "Channel ID": ch_id
                 })
                 channel_ids.append(ch_id)
-                
         if channel_ids:
             sub_data = {}
             for i in range(0, len(list(set(channel_ids))), 50):
@@ -87,7 +85,6 @@ def get_video_metadata(api_key, video_ids):
                     sub_data[item['id']] = int(item['statistics'].get('subscriberCount', 0))
             for video in video_metadata:
                 video['Subscribers'] = sub_data.get(video['Channel ID'], 0)
-                
         return pd.DataFrame(video_metadata)[["Channel Name", "Subscribers", "Video Title", "Video ID"]]
     except: return pd.DataFrame()
 
@@ -95,7 +92,6 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
     if not api_key or not video_ids: return pd.DataFrame()
     youtube = build('youtube', 'v3', developerKey=api_key)
     comments_data = []
-    
     for vid_id in video_ids:
         try:
             request = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=100, order="relevance", textFormat="plainText")
@@ -117,11 +113,10 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
     return pd.DataFrame(comments_data)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_media_data(query, time_filter, max_articles, manual_urls="", deep_scrape=False):
+def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
     media_data = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. Google News Aggregator (Pulls from thousands of free sources)
     if query:
         try:
             search_query = f"{query} when:{time_filter}" if time_filter else query
@@ -129,32 +124,17 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls="", deep
             url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
             feed = feedparser.parse(url)
             
+            # Scrape up to the requested max_articles (Note: Free RSS often caps at 100 per query)
             for entry in feed.entries[:max_articles]: 
                 summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, 'summary') else ""
                 full_content = f"{entry.title}. {summary_text}"
-                
-                # DEEP SCRAPE LOGIC: Visit the actual website
-                if deep_scrape:
-                    try:
-                        res = requests.get(entry.link, headers=headers, timeout=4)
-                        soup = BeautifulSoup(res.text, 'html.parser')
-                        paragraphs = soup.find_all('p')
-                        article_text = ' '.join([p.get_text() for p in paragraphs])
-                        # If we successfully extracted paragraph text, use it instead of the summary
-                        if len(article_text) > 200:
-                            # Cap at 2500 chars to keep NLP processing fast
-                            full_content = f"{entry.title}. {article_text[:2500]}" 
-                    except:
-                        pass # Silently fallback to the summary if the site blocks us
-                
                 media_data.append({
                     "Date": entry.published, "Platform": "Indian Media",
                     "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
-                    "Content": full_content, "Engagement": 500 
+                    "Content": full_content[:1500], "Engagement": 500 
                 })
         except: pass
 
-    # 2. Manual URL Deep Scraping
     if manual_urls:
         urls = [u.strip() for u in manual_urls.split(',') if u.strip().startswith('http')]
         for url in urls:
@@ -168,27 +148,36 @@ def fetch_live_media_data(query, time_filter, max_articles, manual_urls="", deep
                     media_data.append({
                         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "Platform": "Direct Article", "Author": urllib.parse.urlparse(url).netloc,
-                        "Content": f"{title}. {article_text[:2500]}", "Engagement": 1000 
+                        "Content": f"{title}. {article_text[:2000]}", "Engagement": 1000 
                     })
             except: pass
-            
     return pd.DataFrame(media_data)
 
 # ==========================================
-# 3. ADVANCED NLP PIPELINE 
+# 3. DYNAMIC NLP PIPELINE (Custom Features)
 # ==========================================
 @st.cache_data
-def process_nlp(df):
+def process_nlp(df, custom_topics_str):
     if df.empty: return df
     tech_overrides = {"insane": 0.8, "base model": 0.0, "hard pass": -0.9, "10/10": 0.9, "beast": 0.8, "trash": -0.9, "sick": 0.8}
 
+    # Clean the user's custom features into a list
+    custom_list = [x.strip() for x in custom_topics_str.split(',')] if custom_topics_str else []
+
     def get_feature(text):
         t = str(text).lower()
-        if any(w in t for w in ['screen', 'display', 'pixel', 'black', 'oled', 'panel']): return 'Display/Screen'
+        
+        # 1. Check custom features FIRST
+        for custom_feat in custom_list:
+            if custom_feat and custom_feat.lower() in t:
+                return custom_feat.title() # Return the exact custom word capitalized
+                
+        # 2. Fallback to general tech features if no custom match
+        if any(w in t for w in ['screen', 'display', 'pixel', 'black', 'oled']): return 'Display/Screen'
         elif any(w in t for w in ['battery', 'drain', 'mah', 'charge', 'heating']): return 'Battery/Power'
-        elif any(w in t for w in ['price', 'overpriced', 'rs', 'cost', 'expensive', 'budget']): return 'Price/Value'
-        elif any(w in t for w in ['exynos', 'snapdragon', 'thermal', 'lag', 'chip', 'performance']): return 'Performance/Chip'
-        elif any(w in t for w in ['camera', 'zoom', 'lens', 'photo', 'video', 'blur']): return 'Camera'
+        elif any(w in t for w in ['price', 'overpriced', 'rs', 'cost', 'expensive']): return 'Price/Value'
+        elif any(w in t for w in ['exynos', 'snapdragon', 'thermal', 'lag', 'chip']): return 'Performance/Chip'
+        elif any(w in t for w in ['camera', 'zoom', 'lens', 'photo', 'video']): return 'Camera'
         return 'General/Other'
 
     def get_score(text):
@@ -198,7 +187,7 @@ def process_nlp(df):
         return TextBlob(str(text)).sentiment.polarity
         
     def get_category(score):
-        if score > 0.08: return 'Positive' # Adjusted threshold slightly to account for longer articles
+        if score > 0.05: return 'Positive'
         elif score < -0.05: return 'Negative'
         return 'Neutral'
 
@@ -211,20 +200,22 @@ def process_nlp(df):
 # 4. SIDEBAR & EXTRACTION TRIGGER
 # ==========================================
 st.sidebar.markdown("<h2 style='color: white; margin-bottom: 0;'>⚙️ Extraction Engine</h2>", unsafe_allow_html=True)
-st.sidebar.markdown("<p style='font-size: 14px; margin-bottom: 20px;'>Data ingestion & NLP controls.</p>", unsafe_allow_html=True)
 
 try: api_key = st.secrets["YOUTUBE_API_KEY"]
-except KeyError:
-    api_key = None
+except KeyError: api_key = None
 
 # --- MEDIA SECTION (UNLIMITED) ---
-st.sidebar.markdown("### 📰 Media Intelligence (Unlimited)")
+st.sidebar.markdown("### 📰 Media Intelligence (Free/Unlimited)")
 master_query = st.sidebar.text_input("🎯 Target Product", value="Samsung S26 Ultra")
+
+# NEW: Custom Feature Input
+custom_topics = st.sidebar.text_input("➕ Custom Feature Tracking", placeholder="e.g., App, Installation, Heating")
 
 time_map = {"Past 24 Hours": "1d", "Past 7 Days": "7d", "Past 30 Days": "30d", "Past Year": "1y", "Any Time": ""}
 selected_time = st.sidebar.selectbox("⏱️ Article Time Period", list(time_map.keys()), index=1)
-max_articles = st.sidebar.slider("📄 Articles to Scrape", min_value=10, max_value=100, value=30, step=10)
-deep_scrape_toggle = st.sidebar.checkbox("🔍 Deep Scraping (Extract Full Article Text)", value=True, help="Visits the website to read paragraphs, bypassing PR headlines. Slower but higher depth.")
+
+# NEW: Unlocked Media Slider
+max_articles = st.sidebar.slider("📄 Max Articles to Scrape (API Permitting)", min_value=10, max_value=1000, value=100, step=50)
 manual_news_urls = st.sidebar.text_area("📰 Inject Specific Articles", placeholder="Paste URLs here, separated by commas...")
 
 st.sidebar.markdown("---")
@@ -237,15 +228,12 @@ manual_yt_urls = st.sidebar.text_area("🎥 Inject Specific Videos", placeholder
 if st.sidebar.button("🚀 Run Enterprise Extraction", use_container_width=True):
     with st.spinner("Executing pipeline..."):
         
-        # 1. FETCH MEDIA (Always runs)
         st.toast("📰 Scraping media articles...")
-        media_df = fetch_live_media_data(master_query, time_map[selected_time], max_articles, manual_news_urls, deep_scrape=deep_scrape_toggle)
+        media_df = fetch_live_media_data(master_query, time_map[selected_time], max_articles, manual_news_urls)
         
-        # 2. FETCH YOUTUBE (Only if toggled and Key exists)
         yt_df = pd.DataFrame()
         if enable_youtube:
-            if not api_key:
-                st.sidebar.error("⚠️ YouTube API Key missing from Secrets. Skipping YouTube.")
+            if not api_key: st.sidebar.error("⚠️ YouTube API Key missing. Skipping YouTube.")
             else:
                 st.toast("🎥 Scraping YouTube data...")
                 auto_video_ids = auto_discover_videos(api_key, master_query, max_videos=10)
@@ -260,15 +248,14 @@ if st.sidebar.button("🚀 Run Enterprise Extraction", use_container_width=True)
                     new_yt_df = fetch_live_youtube_data(api_key, new_ids_to_fetch)
                     st.session_state['sources_db'] = pd.concat([st.session_state['sources_db'], new_sources_df], ignore_index=True)
                     st.session_state['yt_db'] = pd.concat([st.session_state['yt_db'], new_yt_df], ignore_index=True)
-                    st.toast(f"✅ Fetched {len(new_ids_to_fetch)} new videos!")
                 
                 yt_df = st.session_state['yt_db']
         
-        # 3. COMBINE & PROCESS
         combined_df = pd.concat([yt_df, media_df], ignore_index=True)
         
         if not combined_df.empty:
-            st.session_state['live_data'] = process_nlp(combined_df)
+            # Pass the custom topics into the NLP engine
+            st.session_state['live_data'] = process_nlp(combined_df, custom_topics)
             st.success("Pipeline Execution Complete!")
         else: st.warning("No data returned.")
 
