@@ -8,66 +8,52 @@ import feedparser
 from datetime import datetime
 import urllib.parse
 import re
+import requests
+from bs4 import BeautifulSoup
 
 # ==========================================
-# 1. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION & STATE INIT
 # ==========================================
-st.set_page_config(
-    page_title="Live Market Intelligence", 
-    page_icon="📡", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Live Market Intelligence", page_icon="📡", layout="wide")
+
+# Initialize the "Incremental Vault" to save API Quotas
+if 'yt_db' not in st.session_state:
+    st.session_state['yt_db'] = pd.DataFrame()
+if 'sources_db' not in st.session_state:
+    st.session_state['sources_db'] = pd.DataFrame()
 
 # ==========================================
-# 2. HYBRID EXTRACTION ENGINES (Cached)
+# 2. HYBRID EXTRACTION ENGINES
 # ==========================================
 def extract_video_ids_from_text(text):
-    """Uses Regex to cleanly extract YouTube 11-character IDs from messy URLs or raw text."""
     if not text: return []
-    # Matches standard YouTube URLs, shortened youtu.be URLs, and embed links
     regex = r'(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})'
     matches = re.findall(regex, text)
-    # Also catch raw 11-character IDs if pasted directly
     raw_ids = [word.strip() for word in text.replace(',', ' ').split() if len(word.strip()) == 11 and re.match(r'^[0-9A-Za-z_-]{11}$', word.strip())]
     return list(set(matches + raw_ids))
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def auto_discover_videos(api_key, query, max_videos=10):
-    """Silently searches YouTube for the top ranking videos."""
     if not api_key or not query: return []
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.search().list(
-            part="id",
-            q=query + " review", 
-            type="video",
-            relevanceLanguage="en",
-            maxResults=max_videos,
-            order="relevance" 
-        )
+        request = youtube.search().list(part="id", q=query + " review", type="video", relevanceLanguage="en", maxResults=max_videos, order="relevance")
         response = request.execute()
         return [item['id']['videoId'] for item in response.get('items', [])]
-    except Exception as e:
-        st.error(f"YouTube Search API Error: {e}")
-        return []
+    except: return []
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def get_video_metadata(api_key, video_ids):
-    """Fetches Channel Names, Titles, and Subscriber counts for ANY list of video IDs."""
+    """Fetches metadata ONLY for new videos."""
     if not api_key or not video_ids: return pd.DataFrame()
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
         video_metadata = []
         channel_ids = []
         
-        # 1. Get Video Details (Title, Channel ID)
-        # API allows max 50 IDs per request. We slice safely just in case.
         for i in range(0, len(video_ids), 50):
             chunk = video_ids[i:i+50]
             vid_request = youtube.videos().list(part="snippet", id=",".join(chunk))
             vid_response = vid_request.execute()
-            
             for item in vid_response.get('items', []):
                 ch_id = item['snippet']['channelId']
                 video_metadata.append({
@@ -78,10 +64,8 @@ def get_video_metadata(api_key, video_ids):
                 })
                 channel_ids.append(ch_id)
                 
-        # 2. Get Channel Statistics (Subscribers)
         if channel_ids:
             sub_data = {}
-            # Unique channels only to save quota
             unique_channels = list(set(channel_ids))
             for i in range(0, len(unique_channels), 50):
                 ch_chunk = unique_channels[i:i+50]
@@ -89,34 +73,28 @@ def get_video_metadata(api_key, video_ids):
                 ch_response = ch_request.execute()
                 for item in ch_response.get('items', []):
                     sub_data[item['id']] = int(item['statistics'].get('subscriberCount', 0))
-            
             for video in video_metadata:
-                video['Subscribers'] = sub_data.get(video['Channel ID'], 0) # 0 if hidden
+                video['Subscribers'] = sub_data.get(video['Channel ID'], 0)
                 
         return pd.DataFrame(video_metadata)[["Channel Name", "Subscribers", "Video Title", "Video ID"]]
-    except Exception as e:
-        st.error(f"Metadata Fetch Error: {e}")
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-@st.cache_data(ttl=3600, show_spinner=False) 
 def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
-    """Pulls live comments AND the commenter's username."""
+    """Fetches comments ONLY for new videos."""
     if not api_key or not video_ids: return pd.DataFrame()
-    
     youtube = build('youtube', 'v3', developerKey=api_key)
     comments_data = []
     
     for vid_id in video_ids:
         try:
-            request = youtube.commentThreads().list(
-                part="snippet", videoId=vid_id, maxResults=100, order="relevance", textFormat="plainText"
-            )
+            request = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=100, order="relevance", textFormat="plainText")
             extracted = 0
             while request and extracted < max_comments_per_video:
                 response = request.execute()
                 for item in response.get('items', []):
                     snippet = item['snippet']['topLevelComment']['snippet']
                     comments_data.append({
+                        "Video ID": vid_id, # Track for incremental caching
                         "Date": snippet['publishedAt'],
                         "Platform": "YouTube",
                         "Author": snippet.get('authorDisplayName', 'Anonymous'),
@@ -124,41 +102,63 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
                         "Engagement": int(snippet.get('likeCount', 0))
                     })
                     extracted += 1
-                
                 if 'nextPageToken' in response:
-                    request = youtube.commentThreads().list(
-                        part="snippet", videoId=vid_id, pageToken=response['nextPageToken'], 
-                        maxResults=100, order="relevance", textFormat="plainText"
-                    )
-                else:
-                    break
-        except Exception:
-            pass 
-
+                    request = youtube.commentThreads().list(part="snippet", videoId=vid_id, pageToken=response['nextPageToken'], maxResults=100, order="relevance", textFormat="plainText")
+                else: break
+        except: pass 
     return pd.DataFrame(comments_data)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_media_data(query):
-    """Bypasses HTML blocks using Google News RSS feeds."""
-    if not query: return pd.DataFrame()
-    try:
-        safe_query = urllib.parse.quote(query)
-        url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
-        feed = feedparser.parse(url)
-        
-        media_data = []
-        for entry in feed.entries[:100]: 
-            media_data.append({
-                "Date": entry.published,
-                "Platform": "Indian Media",
-                "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
-                "Content": entry.title, 
-                "Engagement": 500 
-            })
-        return pd.DataFrame(media_data)
-    except Exception as e:
-        st.error(f"Media Extraction Error: {e}")
-        return pd.DataFrame()
+def fetch_live_media_data(query, manual_urls=""):
+    """Deep Scraping: RSS Summaries + Direct Website Paragraph Extraction."""
+    media_data = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    # 1. Google News RSS (Extracting deeper summaries, not just titles)
+    if query:
+        try:
+            safe_query = urllib.parse.quote(query)
+            url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:100]: 
+                # Clean HTML from the summary
+                summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, 'summary') else ""
+                full_content = f"{entry.title}. {summary_text}"
+                
+                media_data.append({
+                    "Date": entry.published,
+                    "Platform": "Indian Media",
+                    "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
+                    "Content": full_content[:1000], # Truncate to keep NLP fast
+                    "Engagement": 500 
+                })
+        except Exception as e:
+            st.warning(f"RSS Issue: {e}")
+
+    # 2. Manual URL Deep Scraping
+    if manual_urls:
+        urls = [u.strip() for u in manual_urls.split(',') if u.strip().startswith('http')]
+        for url in urls:
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                soup = BeautifulSoup(res.text, 'html.parser')
+                # Extract all paragraph text
+                paragraphs = soup.find_all('p')
+                article_text = ' '.join([p.get_text() for p in paragraphs])
+                title = soup.title.string if soup.title else "Manual Article"
+                
+                if article_text:
+                    media_data.append({
+                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Platform": "Direct Article",
+                        "Author": urllib.parse.urlparse(url).netloc,
+                        "Content": f"{title}. {article_text[:1500]}", 
+                        "Engagement": 1000 
+                    })
+            except:
+                st.warning(f"Could not scrape contents of: {url}")
+
+    return pd.DataFrame(media_data)
 
 # ==========================================
 # 3. ADVANCED NLP PIPELINE 
@@ -166,11 +166,7 @@ def fetch_live_media_data(query):
 @st.cache_data
 def process_nlp(df):
     if df.empty: return df
-    
-    tech_overrides = {
-        "insane": 0.8, "base model": 0.0, "hard pass": -0.9, 
-        "10/10": 0.9, "beast": 0.8, "trash": -0.9, "sick": 0.8
-    }
+    tech_overrides = {"insane": 0.8, "base model": 0.0, "hard pass": -0.9, "10/10": 0.9, "beast": 0.8, "trash": -0.9, "sick": 0.8}
 
     def get_feature(text):
         t = str(text).lower()
@@ -201,47 +197,53 @@ def process_nlp(df):
 # 4. SIDEBAR & EXTRACTION TRIGGER
 # ==========================================
 st.sidebar.title("⚙️ Live Extraction Engine")
-st.sidebar.markdown("Auto-hunt the top 10 videos, or manually inject specific URLs.")
 
-try:
-    api_key = st.secrets["YOUTUBE_API_KEY"]
+try: api_key = st.secrets["YOUTUBE_API_KEY"]
 except KeyError:
-    st.sidebar.error("⚠️ API Key missing from Streamlit Settings > Secrets!")
+    st.sidebar.error("⚠️ API Key missing from Streamlit Secrets!")
     api_key = None
 
 master_query = st.sidebar.text_input("1. Target Product (Auto-Hunt)", value="Samsung S26 Ultra")
-manual_urls = st.sidebar.text_area("2. Inject Manual YouTube Links (Optional)", placeholder="Paste full URLs or video IDs here...")
+manual_yt_urls = st.sidebar.text_area("2. Inject YouTube Links (Optional)", placeholder="Paste YouTube URLs here...")
+manual_news_urls = st.sidebar.text_area("3. Inject Media Articles (Optional)", placeholder="Paste news article URLs here, separated by commas...")
 
-if st.sidebar.button("🚀 Run Live Extraction"):
-    if not api_key:
-        st.error("Cannot run extraction without YouTube API key in Secrets.")
+if st.sidebar.button("🚀 Run Incremental Extraction"):
+    if not api_key: st.error("Cannot run without YouTube API key.")
     else:
-        with st.spinner(f"Scraping omnichannel data for '{master_query}'..."):
+        with st.spinner("Extracting new data and skipping duplicates..."):
             
-            # 1. Combine Auto-IDs and Manual-IDs
+            # --- 1. INCREMENTAL YOUTUBE LOGIC ---
             auto_video_ids = auto_discover_videos(api_key, master_query, max_videos=10)
-            manual_video_ids = extract_video_ids_from_text(manual_urls)
+            manual_video_ids = extract_video_ids_from_text(manual_yt_urls)
+            all_requested_ids = list(set(auto_video_ids + manual_video_ids))
             
-            # Deduplicate the final list
-            all_video_ids = list(set(auto_video_ids + manual_video_ids))
+            # Check what we already have in the vault
+            existing_ids = st.session_state['yt_db']['Video ID'].unique().tolist() if not st.session_state['yt_db'].empty else []
+            new_ids_to_fetch = [vid for vid in all_requested_ids if vid not in existing_ids]
             
-            if not all_video_ids and not master_query:
-                st.warning("Please enter a query or provide video URLs.")
+            if new_ids_to_fetch:
+                new_sources_df = get_video_metadata(api_key, new_ids_to_fetch)
+                new_yt_df = fetch_live_youtube_data(api_key, new_ids_to_fetch)
+                
+                # Update the Vault
+                st.session_state['sources_db'] = pd.concat([st.session_state['sources_db'], new_sources_df], ignore_index=True)
+                st.session_state['yt_db'] = pd.concat([st.session_state['yt_db'], new_yt_df], ignore_index=True)
+                st.toast(f"✅ Fetched {len(new_ids_to_fetch)} brand new videos!")
             else:
-                # 2. Fetch Data
-                sources_df = get_video_metadata(api_key, all_video_ids)
-                yt_df = fetch_live_youtube_data(api_key, all_video_ids)
-                media_df = fetch_live_media_data(master_query)
-                
-                # 3. Process Data
-                combined_df = pd.concat([yt_df, media_df], ignore_index=True)
-                
-                if not combined_df.empty:
-                    st.session_state['live_data'] = process_nlp(combined_df)
-                    st.session_state['sources_data'] = sources_df
-                    st.success(f"✅ Successfully extracted data from {len(all_video_ids)} videos and live news!")
-                else:
-                    st.warning("No data returned. Check your inputs.")
+                st.toast("⚡ No new videos detected. Using cached data to save API Quota!")
+
+            # --- 2. DEEP MEDIA LOGIC ---
+            # Media is faster, we fetch this live to ensure we get breaking news
+            media_df = fetch_live_media_data(master_query, manual_news_urls)
+            
+            # --- 3. COMBINE & NLP PROCESS ---
+            combined_df = pd.concat([st.session_state['yt_db'], media_df], ignore_index=True)
+            
+            if not combined_df.empty:
+                st.session_state['live_data'] = process_nlp(combined_df)
+                st.success("Pipeline Execution Complete!")
+            else:
+                st.warning("No data returned.")
 
 # ==========================================
 # 5. DYNAMIC FILTERS 
@@ -251,7 +253,6 @@ st.sidebar.title("🔍 Data Filters")
 
 if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
     df = st.session_state['live_data']
-    
     selected_platform = st.sidebar.multiselect("📡 Platform", df['Platform'].unique(), default=df['Platform'].unique())
     selected_feature = st.sidebar.multiselect("📱 Topic/Feature", df['Feature'].unique(), default=df['Feature'].unique())
     selected_sentiment = st.sidebar.multiselect("🎭 Sentiment Type", ["Positive", "Neutral", "Negative"], default=["Positive", "Neutral", "Negative"])
@@ -261,8 +262,7 @@ if 'live_data' in st.session_state and not st.session_state['live_data'].empty:
         (df['Feature'].isin(selected_feature)) &
         (df['Sentiment_Category'].isin(selected_sentiment))
     ]
-else:
-    filtered_df = pd.DataFrame()
+else: filtered_df = pd.DataFrame()
 
 # ==========================================
 # 6. MAIN DASHBOARD UI
@@ -272,7 +272,6 @@ st.markdown("Automated Category Leadership Dashboard tracking real-time market s
 
 if not filtered_df.empty:
     
-    # KPI ROW
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Filtered Mentions", f"{len(filtered_df):,}")
     col2.metric("Filtered Engagement", f"{filtered_df['Engagement'].sum():,}")
@@ -282,18 +281,13 @@ if not filtered_df.empty:
     
     col3.metric("🔥 Negative Share", f"{pct_negative:.1f}%")
     col4.metric("⭐ Positive Share", f"{pct_positive:.1f}%")
-
     st.markdown("---")
 
-    # DATA SOURCES SUMMARY
-    if 'sources_data' in st.session_state and not st.session_state['sources_data'].empty:
-        with st.expander(f"🎥 View Tracked YouTube Channels ({len(st.session_state['sources_data'])} Videos Found) - Click to Expand", expanded=False):
-            st.markdown("The engine successfully targeted the following channels/videos:")
-            st.dataframe(st.session_state['sources_data'], use_container_width=True)
+    if 'sources_db' in st.session_state and not st.session_state['sources_db'].empty:
+        with st.expander(f"🎥 Tracked YouTube Channels ({len(st.session_state['sources_db'])} Videos in Vault)"):
+            st.dataframe(st.session_state['sources_db'], use_container_width=True)
             
     st.markdown("---")
-    
-    # VISUALIZATION ROW
     col_chart1, col_chart2 = st.columns(2)
     
     with col_chart1:
@@ -321,24 +315,11 @@ if not filtered_df.empty:
             st.plotly_chart(fig_platform, use_container_width=True)
 
     st.markdown("---")
-    
-    # RAW FILTERED VERBATIMS
     st.subheader("💬 Filtered Ground Truth (Raw Verbatims)")
-    st.markdown("Read the exact user comments driving the charts above. Updates automatically based on your sidebar filters.")
-    
     display_df = filtered_df[['Platform', 'Author', 'Feature', 'Sentiment_Category', 'Engagement', 'Content']].sort_values(by='Engagement', ascending=False)
     
     def color_sentiment(val):
         color = '#e74c3c' if val == 'Negative' else '#2ecc71' if val == 'Positive' else 'gray'
         return f'color: {color}'
         
-    st.dataframe(
-        display_df.style.map(color_sentiment, subset=['Sentiment_Category']), 
-        use_container_width=True, 
-        height=500
-    )
-    
-    st.markdown(f"<div style='text-align: center; color: gray; font-size: 12px; margin-top: 40px;'>LIVE TARGET: {master_query.upper()} | CATEGORY LEADERSHIP DASHBOARD</div>", unsafe_allow_html=True)
-
-else:
-    st.info("👈 Enter your target product in the sidebar and click 'Run Live Extraction' to command the pipeline.")
+    st.dataframe(display_df.style.map(color_sentiment, subset=['Sentiment_Category']), use_container_width=True, height=500)
