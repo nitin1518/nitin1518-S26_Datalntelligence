@@ -246,13 +246,13 @@ PLATFORM_COLORS = {
 }
 
 FEATURE_MAP = {
-    "Display/Screen": ["screen", "display", "pixel", "oled", "amoled", "brightness", "refresh rate", "bezel"],
+    "Display/Screen": ["screen", "display", "pixel", "oled", "amoled", "brightness", "refresh rate", "bezel", "hdr", "10 bit", "10bit", "8 bit", "8bit", "color depth"],
     "Battery/Power": ["battery", "drain", "mah", "charge", "charging", "backup", "power", "heating", "warm"],
     "Price/Value": ["price", "overpriced", "cost", "expensive", "cheap", "value for money", "worth", "pricing"],
     "Performance/Chip": ["exynos", "snapdragon", "thermal", "lag", "chip", "processor", "speed", "stutter", "smooth"],
     "Camera": ["camera", "zoom", "lens", "photo", "video", "portrait", "night mode", "shot", "selfie"],
     "Software/App": ["app", "software", "ui", "one ui", "update", "bug", "crash", "glitch", "interface"],
-    "Connectivity": ["network", "wifi", "wi-fi", "bluetooth", "signal", "5g", "connection", "connected"],
+    "Connectivity": ["network", "wifi", "wi fi", "bluetooth", "signal", "5g", "connection", "connected"],
     "Build/Design": ["design", "build", "premium", "weight", "feel", "body", "look", "finish"],
     "Audio/Speakers": ["speaker", "audio", "sound", "mic", "microphone", "volume"],
     "Service/Installation": ["installation", "install", "service", "technician", "support", "customer care", "engineer"]
@@ -319,6 +319,15 @@ if "custom_feature_input" not in st.session_state:
 def normalize_text(text):
     return re.sub(r"\s+", " ", str(text)).strip()
 
+def normalize_for_matching(text):
+    text = str(text).lower().strip()
+    text = text.replace("–", "-").replace("—", "-").replace("-", "-")
+    text = text.replace("/", " ").replace("_", " ")
+    text = text.replace("-", " ")
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 def safe_log1p(x):
     try:
         return math.log1p(max(float(x), 0))
@@ -368,32 +377,60 @@ def get_category(score):
     return "Neutral"
 
 def get_features(text, custom_list):
-    t = str(text).lower()
+    raw_text = str(text)
+    t = normalize_for_matching(raw_text)
     matched = []
 
+    # Custom features
     for custom_feat in custom_list:
         feat = custom_feat.strip()
         if not feat:
             continue
 
-        feat_words = [w.strip() for w in feat.lower().split() if w.strip()]
+        feat_norm = normalize_for_matching(feat)
+
+        if feat_norm and feat_norm in t:
+            matched.append(feat)
+            continue
+
+        feat_words = [w for w in feat_norm.split() if w]
         if feat_words and all(word in t for word in feat_words):
             matched.append(feat)
 
+    # Built-in features
     for feature, keywords in FEATURE_MAP.items():
-        if any(k in t for k in keywords):
-            matched.append(feature)
+        for kw in keywords:
+            kw_norm = normalize_for_matching(kw)
+            if kw_norm and kw_norm in t:
+                matched.append(feature)
+                break
 
     return list(dict.fromkeys(matched)) if matched else ["General/Other"]
 
 def detect_pain_points(text):
-    t = str(text).lower()
-    found = [k for k, vals in PAIN_POINT_MAP.items() if any(v in t for v in vals)]
+    t = normalize_for_matching(text)
+    found = []
+
+    for pain_point, vals in PAIN_POINT_MAP.items():
+        for v in vals:
+            v_norm = normalize_for_matching(v)
+            if v_norm and v_norm in t:
+                found.append(pain_point)
+                break
+
     return found if found else ["None"]
 
 def classify_intent(text):
-    t = str(text).lower()
-    found = [k for k, vals in INTENT_MAP.items() if any(v in t for v in vals)]
+    t = normalize_for_matching(text)
+    found = []
+
+    for intent, vals in INTENT_MAP.items():
+        for v in vals:
+            v_norm = normalize_for_matching(v)
+            if v_norm and v_norm in t:
+                found.append(intent)
+                break
+
     return found if found else ["General Discussion"]
 
 def source_tier(platform, author, subs=0):
@@ -765,7 +802,7 @@ with st.sidebar:
         st.text_input(
             "Custom feature input",
             key="custom_feature_input",
-            placeholder="e.g., Installation, Battery Drain, App Crash",
+            placeholder="e.g., Installation, Battery Drain, App Crash, 10-Bit",
             label_visibility="collapsed",
             on_change=add_custom_feature
         )
@@ -1460,7 +1497,7 @@ if not filtered_df.empty:
         display_df["Intent"] = display_df["Intent_List"].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
         display_df["Date_Display"] = display_df["Date_Local"].dt.strftime("%Y-%m-%d %H:%M") if "Date_Local" in display_df.columns else display_df["Date"]
 
-        search_term = st.text_input("Search in content", placeholder="Try words like battery, heating, overpriced...")
+        search_term = st.text_input("Search in content", placeholder="Try words like battery, heating, overpriced, 10-bit...")
         if search_term:
             display_df = display_df[
                 display_df["Content"].str.contains(search_term, case=False, na=False)
