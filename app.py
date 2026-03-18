@@ -1,17 +1,22 @@
-import streamlit as st
-import pandas as pd
+import math
+import hashlib
+import re
+import urllib.parse
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import feedparser
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from textblob import TextBlob
-from googleapiclient.discovery import build
-import feedparser
-from datetime import datetime, timezone
-import urllib.parse
-import re
 import requests
+import streamlit as st
+import trafilatura
 from bs4 import BeautifulSoup
-import math
+from googleapiclient.discovery import build
+from newspaper import Article
+from textblob import TextBlob
 
 # =========================================================
 # PAGE CONFIG
@@ -224,6 +229,10 @@ st.markdown("""
 # =========================================================
 # CONSTANTS
 # =========================================================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+}
+
 PREMIUM_COLORS = {
     "Positive": "#10B981",
     "Neutral": "#6B7280",
@@ -232,21 +241,51 @@ PREMIUM_COLORS = {
 
 PLATFORM_COLORS = {
     "YouTube": "#8B5CF6",
-    "Indian Media": "#38BDF8",
+    "News": "#38BDF8",
     "Direct Article": "#F59E0B"
 }
 
 FEATURE_MAP = {
-    "Display/Screen": ["screen", "display", "pixel", "oled", "amoled", "brightness", "refresh rate", "bezel", "hdr", "10 bit", "10bit", "8 bit", "8bit", "color depth"],
-    "Battery/Power": ["battery", "drain", "mah", "charge", "charging", "backup", "power", "heating", "warm"],
-    "Price/Value": ["price", "overpriced", "cost", "expensive", "cheap", "value for money", "worth", "pricing"],
-    "Performance/Chip": ["exynos", "snapdragon", "thermal", "lag", "chip", "processor", "speed", "stutter", "smooth"],
-    "Camera": ["camera", "zoom", "lens", "photo", "video", "portrait", "night mode", "shot", "selfie"],
-    "Software/App": ["app", "software", "ui", "one ui", "update", "bug", "crash", "glitch", "interface"],
-    "Connectivity": ["network", "wifi", "wi fi", "bluetooth", "signal", "5g", "connection", "connected"],
-    "Build/Design": ["design", "build", "premium", "weight", "feel", "body", "look", "finish"],
-    "Audio/Speakers": ["speaker", "audio", "sound", "mic", "microphone", "volume"],
-    "Service/Installation": ["installation", "install", "service", "technician", "support", "customer care", "engineer"]
+    "Display/Screen": [
+        "screen", "display", "pixel", "oled", "amoled", "brightness",
+        "refresh rate", "bezel", "hdr", "10 bit", "10bit", "8 bit", "8bit",
+        "color depth", "panel", "banding", "posterization"
+    ],
+    "Battery/Power": [
+        "battery", "drain", "mah", "charge", "charging", "backup",
+        "power", "heating", "warm"
+    ],
+    "Price/Value": [
+        "price", "overpriced", "cost", "expensive", "cheap",
+        "value for money", "worth", "pricing"
+    ],
+    "Performance/Chip": [
+        "exynos", "snapdragon", "thermal", "lag", "chip",
+        "processor", "speed", "stutter", "smooth"
+    ],
+    "Camera": [
+        "camera", "zoom", "lens", "photo", "video",
+        "portrait", "night mode", "shot", "selfie"
+    ],
+    "Software/App": [
+        "app", "software", "ui", "one ui", "update",
+        "bug", "crash", "glitch", "interface"
+    ],
+    "Connectivity": [
+        "network", "wifi", "wi fi", "bluetooth", "signal",
+        "5g", "connection", "connected"
+    ],
+    "Build/Design": [
+        "design", "build", "premium", "weight", "feel",
+        "body", "look", "finish"
+    ],
+    "Audio/Speakers": [
+        "speaker", "audio", "sound", "mic", "microphone", "volume"
+    ],
+    "Service/Installation": [
+        "installation", "install", "service", "technician",
+        "support", "customer care", "engineer"
+    ]
 }
 
 PAIN_POINT_MAP = {
@@ -258,7 +297,8 @@ PAIN_POINT_MAP = {
     "Software Bug": ["bug", "crash", "glitch", "software issue", "app issue"],
     "Connectivity Issue": ["not connecting", "wifi issue", "bluetooth issue", "network issue", "signal issue"],
     "Service Issue": ["bad service", "support issue", "customer care", "service center", "technician issue"],
-    "Installation Issue": ["installation issue", "install issue", "setup issue", "difficult to install"]
+    "Installation Issue": ["installation issue", "install issue", "setup issue", "difficult to install"],
+    "10-Bit / Display Quality": ["10 bit", "10bit", "banding", "posterization", "display issue", "panel issue"]
 }
 
 INTENT_MAP = {
@@ -283,25 +323,30 @@ TECH_OVERRIDES = {
     "battery drain": -0.8,
     "value for money": 0.65,
     "not worth": -0.75,
-    "must buy": 0.8
+    "must buy": 0.8,
+    "banding": -0.7,
+    "posterization": -0.7
 }
 
 # =========================================================
 # SESSION STATE
 # =========================================================
-if "yt_db" not in st.session_state:
-    st.session_state["yt_db"] = pd.DataFrame()
-if "sources_db" not in st.session_state:
-    st.session_state["sources_db"] = pd.DataFrame()
-if "live_data" not in st.session_state:
-    st.session_state["live_data"] = pd.DataFrame()
-if "custom_feature_tags" not in st.session_state:
-    st.session_state["custom_feature_tags"] = []
-if "custom_feature_input" not in st.session_state:
-    st.session_state["custom_feature_input"] = ""
+defaults = {
+    "yt_db": pd.DataFrame(),
+    "sources_db": pd.DataFrame(),
+    "live_data": pd.DataFrame(),
+    "raw_news_data": pd.DataFrame(),
+    "discovered_urls_df": pd.DataFrame(),
+    "pipeline_stats": {},
+    "custom_feature_tags": [],
+    "custom_feature_input": "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # =========================================================
-# UTILITY FUNCTIONS
+# HELPERS
 # =========================================================
 def normalize_text(text):
     return re.sub(r"\s+", " ", str(text)).strip()
@@ -322,7 +367,6 @@ def build_flexible_pattern(phrase):
 
     words = norm.split()
     parts = []
-
     for w in words:
         if w.isdigit():
             parts.append(rf"{re.escape(w)}")
@@ -330,7 +374,6 @@ def build_flexible_pattern(phrase):
             parts.append(rf"{re.escape(w)}")
         else:
             parts.append(rf"{re.escape(w)}(?:s|ed|ing)?")
-
     return r"\b" + r"\s*".join(parts) + r"\b"
 
 def safe_log1p(x):
@@ -339,188 +382,45 @@ def safe_log1p(x):
     except Exception:
         return 0.0
 
-def dedupe_dataframe(df):
-    if df.empty:
-        return df
-    temp = df.copy()
-    temp["Content_Clean"] = (
-        temp["Content"]
-        .astype(str)
-        .str.lower()
-        .str.replace(r"http\S+", "", regex=True)
-        .str.replace(r"[^a-z0-9\s]", " ", regex=True)
-        .str.replace(r"\s+", " ", regex=True)
-        .str.strip()
-    )
-    temp["Dedupe_Key"] = temp["Content_Clean"].str[:300]
-    temp = temp.drop_duplicates(subset=["Platform", "Dedupe_Key"])
-    return temp.drop(columns=["Content_Clean", "Dedupe_Key"], errors="ignore")
+def clean_text(text):
+    return re.sub(r"\s+", " ", str(text)).strip()
 
-def parse_dates(df):
-    if df.empty:
+def text_hash(text):
+    return hashlib.md5(str(text).encode("utf-8")).hexdigest()
+
+def canonicalize_url(url):
+    try:
+        p = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(p.query)
+        if "url" in q:
+            return q["url"][0]
+        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+    except Exception:
+        return url
+
+def safe_df_for_display(df):
+    if df is None or len(df) == 0:
         return df
     out = df.copy()
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce", utc=True)
-    out["Date_Local"] = out["Date"].dt.tz_convert("Asia/Kolkata")
-    out["Day"] = out["Date_Local"].dt.date.astype(str)
-    out["Week"] = out["Date_Local"].dt.strftime("%Y-W%U")
-    out["Month"] = out["Date_Local"].dt.strftime("%Y-%m")
+
+    for col in out.columns:
+        out[col] = out[col].apply(
+            lambda x: ", ".join(map(str, x)) if isinstance(x, (list, tuple, set))
+            else str(x) if isinstance(x, dict)
+            else x
+        )
+
+    out = out.replace([np.inf, -np.inf], np.nan)
+
+    for col in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[col]):
+            try:
+                out[col] = out[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                out[col] = out[col].astype(str)
+
+    out = out.fillna("")
     return out
-
-def get_score(text):
-    t = str(text).lower()
-    for key, val in TECH_OVERRIDES.items():
-        if key in t:
-            return val
-    return TextBlob(str(text)).sentiment.polarity
-
-def get_category(score):
-    if score > 0.05:
-        return "Positive"
-    if score < -0.05:
-        return "Negative"
-    return "Neutral"
-
-def get_features(text, custom_list):
-    t = normalize_for_matching(text)
-    matched = []
-
-    for custom_feat in custom_list:
-        pattern = build_flexible_pattern(custom_feat)
-        if pattern and re.search(pattern, t):
-            matched.append(custom_feat)
-
-    for feature, keywords in FEATURE_MAP.items():
-        for kw in keywords:
-            pattern = build_flexible_pattern(kw)
-            if pattern and re.search(pattern, t):
-                matched.append(feature)
-                break
-
-    return list(dict.fromkeys(matched)) if matched else ["General/Other"]
-
-def detect_pain_points(text):
-    t = normalize_for_matching(text)
-    found = []
-
-    for pain_point, vals in PAIN_POINT_MAP.items():
-        for v in vals:
-            pattern = build_flexible_pattern(v)
-            if pattern and re.search(pattern, t):
-                found.append(pain_point)
-                break
-
-    return found if found else ["None"]
-
-def classify_intent(text):
-    t = normalize_for_matching(text)
-    found = []
-
-    for intent, vals in INTENT_MAP.items():
-        for v in vals:
-            pattern = build_flexible_pattern(v)
-            if pattern and re.search(pattern, t):
-                found.append(intent)
-                break
-
-    return found if found else ["General Discussion"]
-
-def source_tier(platform, author, subs=0):
-    author_l = str(author).lower()
-    if platform == "YouTube":
-        if subs >= 1000000:
-            return "Top Creator"
-        if subs >= 100000:
-            return "Mid Creator"
-        return "Emerging Creator"
-
-    tier1_terms = ["times", "mint", "ndtv", "hindustan", "indianexpress", "moneycontrol", "business", "news18"]
-    if any(x in author_l for x in tier1_terms):
-        return "Tier-1 Media"
-    return "Other Media"
-
-def compute_influence(row):
-    platform = row.get("Platform", "")
-    engagement = row.get("Engagement", 0) if pd.notnull(row.get("Engagement", None)) else 0
-    subscribers = row.get("Subscribers", 0) if pd.notnull(row.get("Subscribers", None)) else 0
-
-    base = safe_log1p(engagement)
-    if platform == "YouTube":
-        return round((base * 1.5) + (safe_log1p(subscribers) * 2.0), 3)
-    if platform == "Indian Media":
-        return round(base + 4.0, 3)
-    if platform == "Direct Article":
-        return round(base + 2.5, 3)
-    return round(base, 3)
-
-def generate_summary_insights(base_df, feature_df=None, pain_df=None):
-    insights = []
-    if base_df.empty:
-        return insights
-
-    total = len(base_df)
-    neg_share = round((len(base_df[base_df["Sentiment_Category"] == "Negative"]) / total) * 100, 1) if total else 0
-    pos_share = round((len(base_df[base_df["Sentiment_Category"] == "Positive"]) / total) * 100, 1) if total else 0
-
-    top_feature = "N/A"
-    if feature_df is not None and not feature_df.empty and "Feature" in feature_df.columns:
-        valid_features = feature_df["Feature"].dropna()
-        if not valid_features.empty:
-            top_feature = valid_features.value_counts().idxmax()
-
-    top_pain = "No major pain point surfaced"
-    if pain_df is not None and not pain_df.empty and "Pain_Point" in pain_df.columns:
-        neg_pain_df = pain_df[
-            (pain_df["Sentiment_Category"] == "Negative") &
-            (pain_df["Pain_Point"] != "None")
-        ]
-        if not neg_pain_df.empty:
-            top_pain = neg_pain_df["Pain_Point"].value_counts().idxmax()
-
-    neg_df = base_df[base_df["Sentiment_Category"] == "Negative"]
-    top_platform_neg = neg_df["Platform"].value_counts().idxmax() if not neg_df.empty else "N/A"
-
-    top_source = "N/A"
-    if "Author" in base_df.columns and "Influence_Score" in base_df.columns:
-        src = base_df.groupby("Author")["Influence_Score"].sum().sort_values(ascending=False)
-        if not src.empty:
-            top_source = src.index[0]
-
-    insights.append(f"Positive share is {pos_share}% while negative share is {neg_share}%.")
-    insights.append(f"Most discussed feature is {top_feature}.")
-    insights.append(f"Top pain point emerging from negative commentary is {top_pain}.")
-    insights.append(f"Highest negative buzz concentration is on {top_platform_neg}.")
-    insights.append(f"Most influential source in the current dataset is {top_source}.")
-    return insights
-
-def compare_recent_vs_previous(df, dimension_col, recent_days=7):
-    if df.empty or "Date_Local" not in df.columns or dimension_col not in df.columns:
-        return pd.DataFrame()
-
-    max_date = df["Date_Local"].max()
-    if pd.isna(max_date):
-        return pd.DataFrame()
-
-    recent_start = max_date - pd.Timedelta(days=recent_days)
-    prev_start = recent_start - pd.Timedelta(days=recent_days)
-
-    recent = df[(df["Date_Local"] >= recent_start) & (df["Date_Local"] <= max_date)]
-    previous = df[(df["Date_Local"] >= prev_start) & (df["Date_Local"] < recent_start)]
-
-    if recent.empty and previous.empty:
-        return pd.DataFrame()
-
-    recent_counts = recent[dimension_col].value_counts().rename("Recent_Count")
-    prev_counts = previous[dimension_col].value_counts().rename("Previous_Count")
-
-    out = pd.concat([recent_counts, prev_counts], axis=1).fillna(0).reset_index()
-    out.columns = [dimension_col, "Recent_Count", "Previous_Count"]
-    out["Growth_%"] = np.where(
-        out["Previous_Count"] > 0,
-        ((out["Recent_Count"] - out["Previous_Count"]) / out["Previous_Count"]) * 100,
-        np.where(out["Recent_Count"] > 0, 100.0, 0.0)
-    )
-    return out.sort_values("Growth_%", ascending=False)
 
 def add_custom_feature():
     feat = st.session_state.get("custom_feature_input", "").strip()
@@ -534,20 +434,271 @@ def remove_custom_feature(idx):
     if 0 <= idx < len(st.session_state["custom_feature_tags"]):
         st.session_state["custom_feature_tags"].pop(idx)
 
-# =========================================================
-# EXTRACTION HELPERS
-# =========================================================
 def extract_video_ids_from_text(text):
     if not text:
         return []
+
+    normalized = str(text).replace("\n", " ").replace("\r", " ").replace(",", " ")
     regex = r'(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})'
-    matches = re.findall(regex, text)
+    matches = re.findall(regex, normalized)
+
     raw_ids = [
-        word.strip() for word in text.replace(",", " ").split()
+        word.strip()
+        for word in normalized.split()
         if len(word.strip()) == 11 and re.match(r'^[0-9A-Za-z_-]{11}$', word.strip())
     ]
-    return list(set(matches + raw_ids))
 
+    return list(dict.fromkeys(matches + raw_ids))
+
+# =========================================================
+# DISCOVERY
+# =========================================================
+def build_query_variants(base_query, enable_expansion=True):
+    base_query = base_query.strip()
+    variants = [base_query]
+    if not enable_expansion or not base_query:
+        return variants
+
+    expansions = [
+        "review", "reviews", "news", "price", "battery", "camera",
+        "display", "performance", "issue", "issues", "complaint",
+        "complaints", "comparison", "vs", "10 bit", "banding",
+        "display issue", "screen issue"
+    ]
+    for ex in expansions:
+        variants.append(f"{base_query} {ex}")
+    return list(dict.fromkeys(variants))
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_google_news_rss_urls(query, time_filter, max_urls):
+    safe_query = urllib.parse.quote(f"{query} when:{time_filter}" if time_filter else query)
+    url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
+    feed = feedparser.parse(url)
+
+    rows = []
+    for entry in feed.entries[:max_urls]:
+        source_title = "Unknown"
+        if hasattr(entry, "source") and hasattr(entry.source, "title"):
+            source_title = entry.source.title
+        rows.append({
+            "Discovery_Source": "Google News RSS",
+            "Title": entry.get("title", ""),
+            "URL": canonicalize_url(entry.get("link", "")),
+            "Published": entry.get("published", ""),
+            "Source": source_title,
+            "Summary": BeautifulSoup(entry.get("summary", ""), "html.parser").get_text(" ", strip=True)
+        })
+    return rows
+
+def fetch_bing_search_urls(query, max_urls=100):
+    rows = []
+    try:
+        search_url = f"https://www.bing.com/news/search?q={urllib.parse.quote(query)}"
+        res = requests.get(search_url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            text = a.get_text(" ", strip=True)
+            if href.startswith("http") and "bing.com" not in href and len(text) > 20:
+                links.append((href, text))
+
+        seen = set()
+        for href, text in links:
+            href = canonicalize_url(href)
+            if href not in seen:
+                seen.add(href)
+                rows.append({
+                    "Discovery_Source": "Bing News",
+                    "Title": text,
+                    "URL": href,
+                    "Published": "",
+                    "Source": urllib.parse.urlparse(href).netloc,
+                    "Summary": ""
+                })
+            if len(rows) >= max_urls:
+                break
+    except Exception:
+        pass
+    return rows
+
+def discover_urls(base_query, time_filter, max_discovery_urls=1000, enable_expansion=True, use_bing=True, manual_urls=""):
+    variants = build_query_variants(base_query, enable_expansion=enable_expansion)
+    discovered = []
+    per_variant_rss = max(20, min(100, max_discovery_urls // max(len(variants), 1)))
+
+    for q in variants:
+        discovered.extend(fetch_google_news_rss_urls(q, time_filter, per_variant_rss))
+        if use_bing:
+            discovered.extend(fetch_bing_search_urls(q, max_urls=max(20, per_variant_rss)))
+
+    if manual_urls:
+        urls = [u.strip() for u in str(manual_urls).split(",") if u.strip().startswith("http")]
+        for u in urls:
+            discovered.append({
+                "Discovery_Source": "Manual URL",
+                "Title": u,
+                "URL": canonicalize_url(u),
+                "Published": "",
+                "Source": urllib.parse.urlparse(u).netloc,
+                "Summary": ""
+            })
+
+    if not discovered:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(discovered)
+    df["URL"] = df["URL"].astype(str).apply(canonicalize_url)
+    df = df[df["URL"].str.startswith("http", na=False)].copy()
+
+    df["url_key"] = df["URL"].str.lower().str.strip()
+    df = df.drop_duplicates(subset=["url_key"]).drop(columns=["url_key"])
+
+    norm_base = normalize_for_matching(base_query)
+    query_words = [w for w in norm_base.split() if len(w) > 2]
+
+    def relevance_score(row):
+        text = normalize_for_matching(f"{row.get('Title','')} {row.get('Summary','')}")
+        score = 0
+        for w in query_words:
+            if w in text:
+                score += 1
+        return score
+
+    df["Relevance_Score"] = df.apply(relevance_score, axis=1)
+    df = df.sort_values(["Relevance_Score", "Published"], ascending=[False, False]).head(max_discovery_urls).reset_index(drop=True)
+    return df
+
+# =========================================================
+# EXTRACTION
+# =========================================================
+def extract_article_content(url):
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                include_tables=False,
+                include_formatting=False
+            )
+            if text and len(text) > 200:
+                return text
+    except Exception:
+        pass
+
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        if article.text and len(article.text) > 200:
+            return article.text
+    except Exception:
+        pass
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(res.text, "html.parser")
+        paragraphs = soup.find_all("p")
+        text = " ".join([p.get_text(" ", strip=True) for p in paragraphs])
+        if len(text) > 200:
+            return text
+    except Exception:
+        pass
+
+    return ""
+
+def extract_single_url(row):
+    url = row["URL"]
+    content = clean_text(extract_article_content(url))
+
+    if len(content) < 120:
+        fallback = clean_text(f"{row.get('Title', '')}. {row.get('Summary', '')}")
+        if len(fallback) >= 80:
+            content = fallback
+        else:
+            return None
+
+    return {
+        "Date": row.get("Published", ""),
+        "Platform": "News" if row.get("Discovery_Source") != "Manual URL" else "Direct Article",
+        "Author": row.get("Source", "Unknown"),
+        "Source": row.get("Source", "Unknown"),
+        "Title": row.get("Title", ""),
+        "Content": content[:12000],
+        "Engagement": np.nan,
+        "URL": url,
+        "Discovery_Source": row.get("Discovery_Source", "Unknown")
+    }
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_news_pipeline(base_query, time_filter, max_discovery_urls, max_extracted_articles, enable_expansion, use_bing, manual_urls, max_workers):
+    discovered_df = discover_urls(
+        base_query=base_query,
+        time_filter=time_filter,
+        max_discovery_urls=max_discovery_urls,
+        enable_expansion=enable_expansion,
+        use_bing=use_bing,
+        manual_urls=manual_urls
+    )
+
+    if discovered_df.empty:
+        return pd.DataFrame(), discovered_df, {
+            "discovered_urls": 0,
+            "extraction_attempts": 0,
+            "valid_extractions": 0,
+            "duplicates_removed": 0,
+            "final_articles": 0
+        }
+
+    records = []
+    seen_hashes = set()
+    extraction_attempts = 0
+    valid_extractions = 0
+    duplicates_removed = 0
+
+    rows = discovered_df.to_dict("records")
+    rows = rows[: max(max_discovery_urls, max_extracted_articles)]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(extract_single_url, row) for row in rows]
+
+        for future in as_completed(futures):
+            extraction_attempts += 1
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+
+            if result is None:
+                continue
+
+            valid_extractions += 1
+            h = text_hash(result["Content"][:3000])
+            if h in seen_hashes:
+                duplicates_removed += 1
+                continue
+
+            seen_hashes.add(h)
+            records.append(result)
+
+            if len(records) >= max_extracted_articles:
+                break
+
+    news_df = pd.DataFrame(records)
+    stats = {
+        "discovered_urls": len(discovered_df),
+        "extraction_attempts": extraction_attempts,
+        "valid_extractions": valid_extractions,
+        "duplicates_removed": duplicates_removed,
+        "final_articles": len(news_df)
+    }
+    return news_df, discovered_df, stats
+
+# =========================================================
+# YOUTUBE ENGINE
+# =========================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def auto_discover_videos(api_key, query, max_videos=10):
     if not api_key or not query:
@@ -634,127 +785,198 @@ def fetch_live_youtube_data(api_key, video_ids, max_comments_per_video=150):
     comments_data = []
 
     for vid_id in video_ids:
-        try:
-            request = youtube.commentThreads().list(
-                part="snippet",
-                videoId=vid_id,
-                maxResults=100,
-                order="relevance",
-                textFormat="plainText"
-            )
-            extracted = 0
+        seen_comments = set()
 
-            while request and extracted < max_comments_per_video:
-                response = request.execute()
-                for item in response.get("items", []):
-                    snippet = item["snippet"]["topLevelComment"]["snippet"]
-                    comments_data.append({
-                        "Video ID": vid_id,
-                        "Date": snippet.get("publishedAt"),
-                        "Platform": "YouTube",
-                        "Author": snippet.get("authorDisplayName", "Anonymous"),
-                        "Content": snippet.get("textDisplay", ""),
-                        "Engagement": int(snippet.get("likeCount", 0))
-                    })
-                    extracted += 1
-                    if extracted >= max_comments_per_video:
-                        break
-
-                if "nextPageToken" in response and extracted < max_comments_per_video:
-                    request = youtube.commentThreads().list(
-                        part="snippet",
-                        videoId=vid_id,
-                        pageToken=response["nextPageToken"],
-                        maxResults=100,
-                        order="relevance",
-                        textFormat="plainText"
-                    )
-                else:
-                    break
-        except Exception:
-            pass
-
-    return pd.DataFrame(comments_data)
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_media_data(query, time_filter, max_articles, manual_urls=""):
-    media_data = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    if query:
-        try:
-            search_query = f"{query} when:{time_filter}" if time_filter else query
-            safe_query = urllib.parse.quote(search_query)
-            url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
-            feed = feedparser.parse(url)
-
-            for entry in feed.entries[:max_articles]:
-                summary_text = BeautifulSoup(entry.summary, "html.parser").get_text(separator=" ") if hasattr(entry, "summary") else ""
-                full_content = f"{entry.title}. {summary_text}"
-                media_data.append({
-                    "Date": getattr(entry, "published", None),
-                    "Platform": "Indian Media",
-                    "Author": entry.source.title if hasattr(entry, 'source') else "News Outlet",
-                    "Content": full_content[:2000],
-                    "Engagement": np.nan
-                })
-        except Exception:
-            pass
-
-    if manual_urls:
-        urls = [u.strip() for u in manual_urls.split(",") if u.strip().startswith("http")]
-        for url in urls:
+        for order_mode in ["relevance", "time"]:
             try:
-                res = requests.get(url, headers=headers, timeout=7)
-                soup = BeautifulSoup(res.text, "html.parser")
-                paragraphs = soup.find_all("p")
-                article_text = " ".join([p.get_text(" ", strip=True) for p in paragraphs])
-                title = soup.title.string if soup.title else "Manual Article"
-                if article_text:
-                    media_data.append({
-                        "Date": datetime.now(timezone.utc).isoformat(),
-                        "Platform": "Direct Article",
-                        "Author": urllib.parse.urlparse(url).netloc,
-                        "Content": f"{title}. {article_text[:2500]}",
-                        "Engagement": np.nan
-                    })
+                request = youtube.commentThreads().list(
+                    part="snippet",
+                    videoId=vid_id,
+                    maxResults=100,
+                    order=order_mode,
+                    textFormat="plainText"
+                )
+                extracted = 0
+
+                while request and extracted < max_comments_per_video:
+                    response = request.execute()
+
+                    for item in response.get("items", []):
+                        snippet = item["snippet"]["topLevelComment"]["snippet"]
+                        text_val = snippet.get("textDisplay", "").strip()
+
+                        if not text_val:
+                            continue
+
+                        dedupe_key = f"{vid_id}::{text_val.lower()[:300]}"
+                        if dedupe_key in seen_comments:
+                            continue
+                        seen_comments.add(dedupe_key)
+
+                        comments_data.append({
+                            "Video ID": vid_id,
+                            "Date": snippet.get("publishedAt"),
+                            "Platform": "YouTube",
+                            "Author": snippet.get("authorDisplayName", "Anonymous"),
+                            "Source": snippet.get("authorDisplayName", "Anonymous"),
+                            "Title": "",
+                            "Content": text_val,
+                            "Engagement": int(snippet.get("likeCount", 0)),
+                            "URL": f"https://www.youtube.com/watch?v={vid_id}"
+                        })
+                        extracted += 1
+
+                        if extracted >= max_comments_per_video:
+                            break
+
+                    if "nextPageToken" in response and extracted < max_comments_per_video:
+                        request = youtube.commentThreads().list(
+                            part="snippet",
+                            videoId=vid_id,
+                            pageToken=response["nextPageToken"],
+                            maxResults=100,
+                            order=order_mode,
+                            textFormat="plainText"
+                        )
+                    else:
+                        break
             except Exception:
                 pass
 
-    return pd.DataFrame(media_data)
+    return pd.DataFrame(comments_data)
 
 # =========================================================
-# NLP PIPELINE
+# NLP
 # =========================================================
+def get_score(text):
+    t = str(text).lower()
+    for key, val in TECH_OVERRIDES.items():
+        if key in t:
+            return val
+    return TextBlob(str(text)).sentiment.polarity
+
+def get_category(score):
+    if score > 0.05:
+        return "Positive"
+    if score < -0.05:
+        return "Negative"
+    return "Neutral"
+
+def get_features(text, custom_list):
+    t = normalize_for_matching(text)
+    matched = []
+
+    for custom_feat in custom_list:
+        pattern = build_flexible_pattern(custom_feat)
+        if pattern and re.search(pattern, t):
+            matched.append(custom_feat)
+
+    for feature, keywords in FEATURE_MAP.items():
+        for kw in keywords:
+            pattern = build_flexible_pattern(kw)
+            if pattern and re.search(pattern, t):
+                matched.append(feature)
+                break
+
+    return list(dict.fromkeys(matched)) if matched else ["General/Other"]
+
+def detect_pain_points(text):
+    t = normalize_for_matching(text)
+    found = []
+
+    for pain_point, vals in PAIN_POINT_MAP.items():
+        for v in vals:
+            pattern = build_flexible_pattern(v)
+            if pattern and re.search(pattern, t):
+                found.append(pain_point)
+                break
+
+    return found if found else ["None"]
+
+def classify_intent(text):
+    t = normalize_for_matching(text)
+    found = []
+
+    for intent, vals in INTENT_MAP.items():
+        for v in vals:
+            pattern = build_flexible_pattern(v)
+            if pattern and re.search(pattern, t):
+                found.append(intent)
+                break
+
+    return found if found else ["General Discussion"]
+
+def source_tier(platform, author, subs=0):
+    author_l = str(author).lower()
+
+    if platform == "YouTube":
+        if subs >= 1000000:
+            return "Top Creator"
+        if subs >= 100000:
+            return "Mid Creator"
+        return "Emerging Creator"
+
+    tier1_terms = ["times", "mint", "ndtv", "hindustan", "indianexpress", "moneycontrol", "business", "news18"]
+    if any(x in author_l for x in tier1_terms):
+        return "Tier-1 Media"
+    return "Other Media"
+
+def compute_influence(row):
+    platform = row.get("Platform", "")
+    engagement = row.get("Engagement", 0) if pd.notnull(row.get("Engagement", None)) else 0
+    subscribers = row.get("Subscribers", 0) if pd.notnull(row.get("Subscribers", None)) else 0
+
+    base = safe_log1p(engagement)
+    if platform == "YouTube":
+        return round((base * 1.5) + (safe_log1p(subscribers) * 2.0), 3)
+    if platform == "News":
+        return round(base + 4.0, 3)
+    if platform == "Direct Article":
+        return round(base + 2.5, 3)
+    return round(base, 3)
+
 @st.cache_data(show_spinner=False)
 def process_nlp(df, custom_topics_tuple):
     if df.empty:
         return df
 
     custom_list = list(custom_topics_tuple) if custom_topics_tuple else []
+    out = df.copy()
 
-    df = dedupe_dataframe(df)
-    df = parse_dates(df)
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce", utc=True)
+    out["Date_Local"] = out["Date"].dt.tz_convert("Asia/Kolkata")
+    out["Day"] = out["Date_Local"].dt.date.astype(str)
+    out["Week"] = out["Date_Local"].dt.strftime("%Y-W%U")
+    out["Month"] = out["Date_Local"].dt.strftime("%Y-%m")
 
-    df["Content"] = df["Content"].astype(str).apply(normalize_text)
-    df["Sentiment_Score"] = df["Content"].apply(get_score)
-    df["Sentiment_Category"] = df["Sentiment_Score"].apply(get_category)
-    df["Feature_List"] = df["Content"].apply(lambda x: get_features(x, custom_list))
-    df["Pain_Point_List"] = df["Content"].apply(detect_pain_points)
-    df["Intent_List"] = df["Content"].apply(classify_intent)
+    for col in ["Title", "Video Title", "Content", "Author", "Source"]:
+        if col not in out.columns:
+            out[col] = ""
+        out[col] = out[col].astype(str).fillna("")
 
-    if "Subscribers" not in df.columns:
-        df["Subscribers"] = 0
+    out["Content"] = out["Content"].apply(normalize_text)
+    out["Analysis_Text"] = (
+        out["Title"].fillna("") + " " +
+        out["Video Title"].fillna("") + " " +
+        out["Content"].fillna("")
+    ).str.strip()
 
-    df["Source_Tier"] = df.apply(
+    out["Sentiment_Score"] = out["Content"].apply(get_score)
+    out["Sentiment_Category"] = out["Sentiment_Score"].apply(get_category)
+    out["Feature_List"] = out["Analysis_Text"].apply(lambda x: get_features(x, custom_list))
+    out["Pain_Point_List"] = out["Analysis_Text"].apply(detect_pain_points)
+    out["Intent_List"] = out["Analysis_Text"].apply(classify_intent)
+
+    if "Subscribers" not in out.columns:
+        out["Subscribers"] = 0
+
+    out["Source_Tier"] = out.apply(
         lambda r: source_tier(r.get("Platform", ""), r.get("Author", ""), r.get("Subscribers", 0)),
         axis=1
     )
-
-    df["Influence_Score"] = df.apply(compute_influence, axis=1)
-    df["Weighted_Sentiment"] = df["Sentiment_Score"] * (df["Influence_Score"] + 1)
-
-    return df
+    out["Influence_Score"] = out.apply(compute_influence, axis=1)
+    out["Weighted_Sentiment"] = out["Sentiment_Score"] * (out["Influence_Score"] + 1)
+    return out
 
 def explode_for_analysis(df):
     if df.empty:
@@ -771,6 +993,89 @@ def explode_for_analysis(df):
     return feature_df, pain_df, intent_df
 
 # =========================================================
+# SUMMARY
+# =========================================================
+def generate_summary_insights(base_df, feature_df=None, pain_df=None):
+    insights = []
+    if base_df.empty:
+        return insights
+
+    total = len(base_df)
+    neg_share = round((len(base_df[base_df["Sentiment_Category"] == "Negative"]) / total) * 100, 1) if total else 0
+    pos_share = round((len(base_df[base_df["Sentiment_Category"] == "Positive"]) / total) * 100, 1) if total else 0
+
+    top_feature = "N/A"
+    if feature_df is not None and not feature_df.empty and "Feature" in feature_df.columns:
+        valid_features = feature_df["Feature"].dropna()
+        if not valid_features.empty:
+            top_feature = valid_features.value_counts().idxmax()
+
+    top_pain = "No major pain point surfaced"
+    if pain_df is not None and not pain_df.empty and "Pain_Point" in pain_df.columns:
+        neg_pain_df = pain_df[
+            (pain_df["Sentiment_Category"] == "Negative") &
+            (pain_df["Pain_Point"] != "None")
+        ]
+        if not neg_pain_df.empty:
+            top_pain = neg_pain_df["Pain_Point"].value_counts().idxmax()
+
+    neg_df = base_df[base_df["Sentiment_Category"] == "Negative"]
+    top_platform_neg = neg_df["Platform"].value_counts().idxmax() if not neg_df.empty else "N/A"
+
+    top_source = "N/A"
+    if "Author" in base_df.columns and "Influence_Score" in base_df.columns:
+        src = base_df.groupby("Author")["Influence_Score"].sum().sort_values(ascending=False)
+        if not src.empty:
+            top_source = src.index[0]
+
+    insights.append(f"Positive share is {pos_share}% while negative share is {neg_share}%.")
+    insights.append(f"Most discussed feature is {top_feature}.")
+    insights.append(f"Top pain point emerging from negative commentary is {top_pain}.")
+    insights.append(f"Highest negative buzz concentration is on {top_platform_neg}.")
+    insights.append(f"Most influential source in the current dataset is {top_source}.")
+    return insights
+
+def compare_recent_vs_previous(df, dimension_col, recent_days=7):
+    if df.empty or "Date_Local" not in df.columns or dimension_col not in df.columns:
+        return pd.DataFrame()
+
+    temp = df.copy()
+    temp = temp[temp[dimension_col].notna()].copy()
+    temp[dimension_col] = temp[dimension_col].astype(str).str.strip()
+    temp = temp[temp[dimension_col] != ""]
+
+    if temp.empty:
+        return pd.DataFrame()
+
+    max_date = temp["Date_Local"].max()
+    if pd.isna(max_date):
+        return pd.DataFrame()
+
+    recent_start = max_date - pd.Timedelta(days=recent_days)
+    prev_start = recent_start - pd.Timedelta(days=recent_days)
+
+    recent = temp[(temp["Date_Local"] >= recent_start) & (temp["Date_Local"] <= max_date)]
+    previous = temp[(temp["Date_Local"] >= prev_start) & (temp["Date_Local"] < recent_start)]
+
+    if recent.empty and previous.empty:
+        return pd.DataFrame()
+
+    recent_counts = recent[dimension_col].value_counts().rename("Recent_Count")
+    prev_counts = previous[dimension_col].value_counts().rename("Previous_Count")
+
+    out = pd.concat([recent_counts, prev_counts], axis=1).fillna(0).reset_index()
+    out.columns = [dimension_col, "Recent_Count", "Previous_Count"]
+    out["Growth_%"] = np.where(
+        out["Previous_Count"] > 0,
+        ((out["Recent_Count"] - out["Previous_Count"]) / out["Previous_Count"]) * 100,
+        np.where(out["Recent_Count"] > 0, 100.0, 0.0)
+    )
+
+    out = out.replace([np.inf, -np.inf], 0)
+    out = out.fillna(0)
+    return out.sort_values("Growth_%", ascending=False)
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 try:
@@ -780,7 +1085,7 @@ except Exception:
 
 with st.sidebar:
     st.markdown('<div class="sidebar-title">⚙️ Extraction Engine</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-caption">Configure product targets, sources, and feature tracking.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-caption">Expanded discovery + better YouTube issue extraction + safer rendering.</div>', unsafe_allow_html=True)
 
     master_query = st.text_input("🎯 Target Product / Query", value="Samsung S26 Ultra")
 
@@ -792,7 +1097,7 @@ with st.sidebar:
         st.text_input(
             "Custom feature input",
             key="custom_feature_input",
-            placeholder="e.g., Installation, Drain, App Crash, 10-Bit",
+            placeholder="e.g., 10-Bit, Drain, App Crash",
             label_visibility="collapsed",
             on_change=add_custom_feature
         )
@@ -821,42 +1126,41 @@ with st.sidebar:
     }
     selected_time = st.selectbox("⏱️ Article Time Period", list(time_map.keys()), index=1)
 
-    max_articles = st.slider(
-        "📄 Max Articles to Scrape",
-        min_value=10,
-        max_value=500,
-        value=100,
-        step=10
+    auto_expand = st.checkbox("🔎 Auto Query Expansion", value=True)
+    use_bing_discovery = st.checkbox("🌐 Add Bing Discovery", value=True)
+
+    max_discovery_urls = st.number_input(
+        "🌐 Discovery URL Pool Size",
+        min_value=50,
+        max_value=5000,
+        value=1200,
+        step=100
     )
+
+    max_extracted_articles = st.number_input(
+        "📰 Max Successfully Extracted Articles",
+        min_value=20,
+        max_value=2000,
+        value=300,
+        step=25
+    )
+
+    max_workers = st.slider("⚡ Parallel Extraction Workers", 4, 32, 12, 2)
 
     manual_news_urls = st.text_area(
         "📰 Inject Specific Articles",
-        placeholder="Paste URLs here, separated by commas..."
+        placeholder="Paste article URLs here, separated by commas..."
     )
 
     st.markdown("---")
     st.markdown('<div class="sidebar-title">🎥 YouTube Intelligence</div>', unsafe_allow_html=True)
 
     enable_youtube = st.checkbox("Enable YouTube Scraping", value=False)
-    max_comments_per_video = st.slider(
-        "💬 Max Comments per Video",
-        min_value=50,
-        max_value=500,
-        value=150,
-        step=25,
-        disabled=not enable_youtube
-    )
-    auto_video_count = st.slider(
-        "🎞️ Auto Discover Videos",
-        min_value=3,
-        max_value=25,
-        value=10,
-        step=1,
-        disabled=not enable_youtube
-    )
+    max_comments_per_video = st.slider("💬 Max Comments per Video", 50, 500, 200, 25, disabled=not enable_youtube)
+    auto_video_count = st.slider("🎞️ Auto Discover Videos", 3, 25, 10, 1, disabled=not enable_youtube)
     manual_yt_urls = st.text_area(
         "🎥 Inject Specific Videos",
-        placeholder="Paste YouTube URLs here..."
+        placeholder="Paste YouTube URLs here, separated by commas or new lines..."
     )
 
     st.markdown("---")
@@ -866,16 +1170,266 @@ with st.sidebar:
 custom_topics_tuple = tuple(st.session_state["custom_feature_tags"])
 
 # =========================================================
-# EXTRACTION TRIGGER
+# DISCOVERY FUNCTIONS
+# =========================================================
+def build_query_variants(base_query, enable_expansion=True):
+    base_query = base_query.strip()
+    variants = [base_query]
+    if not enable_expansion or not base_query:
+        return variants
+
+    expansions = [
+        "review", "reviews", "news", "price", "battery", "camera",
+        "display", "performance", "issue", "issues", "complaint",
+        "complaints", "comparison", "vs", "10 bit", "banding",
+        "display issue", "screen issue"
+    ]
+    for ex in expansions:
+        variants.append(f"{base_query} {ex}")
+    return list(dict.fromkeys(variants))
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_google_news_rss_urls(query, time_filter, max_urls):
+    safe_query = urllib.parse.quote(f"{query} when:{time_filter}" if time_filter else query)
+    url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
+    feed = feedparser.parse(url)
+
+    rows = []
+    for entry in feed.entries[:max_urls]:
+        source_title = "Unknown"
+        if hasattr(entry, "source") and hasattr(entry.source, "title"):
+            source_title = entry.source.title
+        rows.append({
+            "Discovery_Source": "Google News RSS",
+            "Title": entry.get("title", ""),
+            "URL": canonicalize_url(entry.get("link", "")),
+            "Published": entry.get("published", ""),
+            "Source": source_title,
+            "Summary": BeautifulSoup(entry.get("summary", ""), "html.parser").get_text(" ", strip=True)
+        })
+    return rows
+
+def fetch_bing_search_urls(query, max_urls=100):
+    rows = []
+    try:
+        search_url = f"https://www.bing.com/news/search?q={urllib.parse.quote(query)}"
+        res = requests.get(search_url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            text = a.get_text(" ", strip=True)
+            if href.startswith("http") and "bing.com" not in href and len(text) > 20:
+                links.append((href, text))
+
+        seen = set()
+        for href, text in links:
+            href = canonicalize_url(href)
+            if href not in seen:
+                seen.add(href)
+                rows.append({
+                    "Discovery_Source": "Bing News",
+                    "Title": text,
+                    "URL": href,
+                    "Published": "",
+                    "Source": urllib.parse.urlparse(href).netloc,
+                    "Summary": ""
+                })
+            if len(rows) >= max_urls:
+                break
+    except Exception:
+        pass
+    return rows
+
+def discover_urls(base_query, time_filter, max_discovery_urls=1000, enable_expansion=True, use_bing=True, manual_urls=""):
+    variants = build_query_variants(base_query, enable_expansion=enable_expansion)
+    discovered = []
+    per_variant_rss = max(20, min(100, max_discovery_urls // max(len(variants), 1)))
+
+    for q in variants:
+        discovered.extend(fetch_google_news_rss_urls(q, time_filter, per_variant_rss))
+        if use_bing:
+            discovered.extend(fetch_bing_search_urls(q, max_urls=max(20, per_variant_rss)))
+
+    if manual_urls:
+        urls = [u.strip() for u in str(manual_urls).split(",") if u.strip().startswith("http")]
+        for u in urls:
+            discovered.append({
+                "Discovery_Source": "Manual URL",
+                "Title": u,
+                "URL": canonicalize_url(u),
+                "Published": "",
+                "Source": urllib.parse.urlparse(u).netloc,
+                "Summary": ""
+            })
+
+    if not discovered:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(discovered)
+    df["URL"] = df["URL"].astype(str).apply(canonicalize_url)
+    df = df[df["URL"].str.startswith("http", na=False)].copy()
+
+    df["url_key"] = df["URL"].str.lower().str.strip()
+    df = df.drop_duplicates(subset=["url_key"]).drop(columns=["url_key"])
+
+    norm_base = normalize_for_matching(base_query)
+    query_words = [w for w in norm_base.split() if len(w) > 2]
+
+    def relevance_score(row):
+        text = normalize_for_matching(f"{row.get('Title','')} {row.get('Summary','')}")
+        score = 0
+        for w in query_words:
+            if w in text:
+                score += 1
+        return score
+
+    df["Relevance_Score"] = df.apply(relevance_score, axis=1)
+    df = df.sort_values(["Relevance_Score", "Published"], ascending=[False, False]).head(max_discovery_urls).reset_index(drop=True)
+    return df
+
+# =========================================================
+# EXTRACTION FUNCTIONS
+# =========================================================
+def extract_article_content(url):
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                include_tables=False,
+                include_formatting=False
+            )
+            if text and len(text) > 200:
+                return text
+    except Exception:
+        pass
+
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        if article.text and len(article.text) > 200:
+            return article.text
+    except Exception:
+        pass
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(res.text, "html.parser")
+        paragraphs = soup.find_all("p")
+        text = " ".join([p.get_text(" ", strip=True) for p in paragraphs])
+        if len(text) > 200:
+            return text
+    except Exception:
+        pass
+
+    return ""
+
+def extract_single_url(row):
+    url = row["URL"]
+    content = clean_text(extract_article_content(url))
+
+    if len(content) < 120:
+        fallback = clean_text(f"{row.get('Title', '')}. {row.get('Summary', '')}")
+        if len(fallback) >= 80:
+            content = fallback
+        else:
+            return None
+
+    return {
+        "Date": row.get("Published", ""),
+        "Platform": "News" if row.get("Discovery_Source") != "Manual URL" else "Direct Article",
+        "Author": row.get("Source", "Unknown"),
+        "Source": row.get("Source", "Unknown"),
+        "Title": row.get("Title", ""),
+        "Content": content[:12000],
+        "Engagement": np.nan,
+        "URL": url,
+        "Discovery_Source": row.get("Discovery_Source", "Unknown")
+    }
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_news_pipeline(base_query, time_filter, max_discovery_urls, max_extracted_articles, enable_expansion, use_bing, manual_urls, max_workers):
+    discovered_df = discover_urls(
+        base_query=base_query,
+        time_filter=time_filter,
+        max_discovery_urls=max_discovery_urls,
+        enable_expansion=enable_expansion,
+        use_bing=use_bing,
+        manual_urls=manual_urls
+    )
+
+    if discovered_df.empty:
+        return pd.DataFrame(), discovered_df, {
+            "discovered_urls": 0,
+            "extraction_attempts": 0,
+            "valid_extractions": 0,
+            "duplicates_removed": 0,
+            "final_articles": 0
+        }
+
+    records = []
+    seen_hashes = set()
+    extraction_attempts = 0
+    valid_extractions = 0
+    duplicates_removed = 0
+
+    rows = discovered_df.to_dict("records")
+    rows = rows[: max(max_discovery_urls, max_extracted_articles)]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(extract_single_url, row) for row in rows]
+
+        for future in as_completed(futures):
+            extraction_attempts += 1
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+
+            if result is None:
+                continue
+
+            valid_extractions += 1
+            h = text_hash(result["Content"][:3000])
+            if h in seen_hashes:
+                duplicates_removed += 1
+                continue
+
+            seen_hashes.add(h)
+            records.append(result)
+
+            if len(records) >= max_extracted_articles:
+                break
+
+    news_df = pd.DataFrame(records)
+    stats = {
+        "discovered_urls": len(discovered_df),
+        "extraction_attempts": extraction_attempts,
+        "valid_extractions": valid_extractions,
+        "duplicates_removed": duplicates_removed,
+        "final_articles": len(news_df)
+    }
+    return news_df, discovered_df, stats
+
+# =========================================================
+# PIPELINE EXECUTION
 # =========================================================
 if run_pipeline:
-    with st.spinner("Executing omnichannel intelligence pipeline..."):
-        st.toast("📰 Collecting media coverage...")
-        media_df = fetch_live_media_data(
-            master_query,
-            time_map[selected_time],
-            max_articles,
-            manual_news_urls
+    with st.spinner("Running expanded discovery + extraction pipeline..."):
+        st.toast("🌐 Discovering large URL pool...")
+        news_df, discovered_df, stats = run_news_pipeline(
+            base_query=master_query,
+            time_filter=time_map[selected_time],
+            max_discovery_urls=int(max_discovery_urls),
+            max_extracted_articles=int(max_extracted_articles),
+            enable_expansion=auto_expand,
+            use_bing=use_bing_discovery,
+            manual_urls=manual_news_urls,
+            max_workers=int(max_workers)
         )
 
         yt_df = pd.DataFrame()
@@ -894,7 +1448,6 @@ if run_pipeline:
                     if not st.session_state["yt_db"].empty and "Video ID" in st.session_state["yt_db"].columns
                     else []
                 )
-
                 new_ids_to_fetch = [vid for vid in all_requested_ids if vid not in existing_ids]
 
                 if new_ids_to_fetch:
@@ -907,7 +1460,7 @@ if run_pipeline:
                             ignore_index=True
                         ).drop_duplicates(subset=["Video ID"], keep="last")
 
-                    if not new_yt_df.empty:
+                    if not new_yt_df.empty and not new_sources_df.empty:
                         enriched_new_yt_df = new_yt_df.merge(
                             new_sources_df[["Video ID", "Channel Name", "Subscribers", "Video Title", "Video Views", "Video Likes"]],
                             on="Video ID",
@@ -920,12 +1473,18 @@ if run_pipeline:
 
                 yt_df = st.session_state["yt_db"].copy()
 
-        combined_df = pd.concat([yt_df, media_df], ignore_index=True)
+        combined_df = pd.concat([news_df, yt_df], ignore_index=True)
+
+        st.session_state["raw_news_data"] = news_df
+        st.session_state["discovered_urls_df"] = discovered_df
+        st.session_state["pipeline_stats"] = stats
 
         if not combined_df.empty:
             processed = process_nlp(combined_df, custom_topics_tuple)
             st.session_state["live_data"] = processed
-            st.success("Pipeline execution complete.")
+            st.success(
+                f"Done. Discovered {stats.get('discovered_urls', 0):,} URLs, extracted {stats.get('final_articles', 0):,} news articles, final combined rows {len(combined_df):,}."
+            )
         else:
             st.warning("No data returned from the selected sources.")
 
@@ -934,8 +1493,17 @@ if run_pipeline:
 # =========================================================
 st.markdown('<div class="main-title">📡 Omnichannel Product Intelligence</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">A premium intelligence cockpit for product sentiment, pain points, feature narratives, and source influence.</div>',
+    '<div class="sub-title">Expanded discovery pipeline: query expansion + Google News RSS + Bing discovery + stronger YouTube issue extraction.</div>',
     unsafe_allow_html=True
+)
+
+stats = st.session_state.get("pipeline_stats", {})
+stats_text = (
+    f"Discovered URLs: {stats.get('discovered_urls', 0):,} • "
+    f"Extraction attempts: {stats.get('extraction_attempts', 0):,} • "
+    f"Valid extractions: {stats.get('valid_extractions', 0):,} • "
+    f"Duplicates removed: {stats.get('duplicates_removed', 0):,} • "
+    f"Final articles: {stats.get('final_articles', 0):,}"
 )
 
 st.markdown(f"""
@@ -947,20 +1515,19 @@ st.markdown(f"""
         {master_query if master_query else "No target selected"}
     </div>
     <div class="small-note">
-        This dashboard combines media and YouTube consumer voice, enriches it with rule-based NLP, and surfaces actionable product intelligence.
+        {stats_text}
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 # =========================================================
-# FILTERS
+# FILTER PREP
 # =========================================================
 raw_df = st.session_state["live_data"].copy()
 
 if not raw_df.empty:
     feature_df, pain_df, intent_df = explode_for_analysis(raw_df)
 
-    # Ensure custom features always appear in filter list
     detected_features = sorted(feature_df["Feature"].dropna().unique().tolist())
     custom_features = [x.strip() for x in st.session_state["custom_feature_tags"] if x.strip()]
     all_feature_options = sorted(set(detected_features + custom_features), key=lambda x: x.lower())
@@ -969,37 +1536,37 @@ if not raw_df.empty:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🔍 Intelligence Filters")
 
-        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.2, 1.2, 1.1, 1.1])
+        c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.1, 1.1])
 
-        with filter_col1:
+        with c1:
             selected_platform = st.multiselect(
                 "Platform",
                 sorted(feature_df["Platform"].dropna().unique().tolist()),
                 default=sorted(feature_df["Platform"].dropna().unique().tolist())
             )
 
-        with filter_col2:
+        with c2:
             selected_feature = st.multiselect(
                 "Feature / Topic",
                 all_feature_options,
                 default=all_feature_options
             )
 
-        with filter_col3:
+        with c3:
             selected_sentiment = st.multiselect(
                 "Sentiment",
                 ["Positive", "Neutral", "Negative"],
                 default=["Positive", "Neutral", "Negative"]
             )
 
-        with filter_col4:
+        with c4:
             selected_intent = st.multiselect(
                 "Intent",
                 sorted(intent_df["Intent"].dropna().unique().tolist()),
                 default=sorted(intent_df["Intent"].dropna().unique().tolist())
             )
 
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     filtered_feature_df = feature_df[
         (feature_df["Platform"].isin(selected_platform)) &
@@ -1020,8 +1587,7 @@ if not raw_df.empty:
 
     filtered_feature_df = filtered_feature_df.loc[filtered_feature_df.index.isin(filtered_df.index)].copy()
     filtered_pain_df = pain_df.loc[pain_df.index.isin(filtered_df.index)].copy()
-    filtered_intent_df = filtered_intent_df.loc[filtered_intent_df.index.isin(filtered_df.index)].copy()
-
+    filtered_intent_df = intent_df.loc[intent_df.index.isin(filtered_df.index)].copy()
 else:
     feature_df = pd.DataFrame()
     pain_df = pd.DataFrame()
@@ -1036,8 +1602,15 @@ else:
 # DEBUG
 # =========================================================
 if show_debug:
-    with st.expander("Debug: Custom feature detection"):
+    with st.expander("Debug: Pipeline and custom feature detection"):
         st.write("Tracked custom features:", list(custom_topics_tuple))
+        st.write("Pipeline stats:", st.session_state.get("pipeline_stats", {}))
+
+        discovered_df = st.session_state.get("discovered_urls_df", pd.DataFrame())
+        if not discovered_df.empty:
+            st.write("Sample discovered URLs:")
+            st.dataframe(safe_df_for_display(discovered_df.head(30)), use_container_width=True)
+
         if not feature_df.empty:
             st.write("Detected features in data:", sorted(feature_df["Feature"].dropna().unique().tolist()))
             st.write("Feature filter options:", all_feature_options)
@@ -1047,11 +1620,11 @@ if show_debug:
                 raw_df["Feature_List"].apply(
                     lambda x: any(f in x for f in custom_topics_tuple) if isinstance(x, list) else False
                 )
-            ][["Platform", "Author", "Content", "Feature_List"]]
+            ][["Platform", "Author", "Title", "Video Title", "Content", "Feature_List"]]
 
             st.write(f"Rows matched by custom features: {len(debug_hits)}")
             if not debug_hits.empty:
-                st.dataframe(debug_hits.head(20), use_container_width=True)
+                st.dataframe(safe_df_for_display(debug_hits.head(20)), use_container_width=True)
 
 # =========================================================
 # DASHBOARD
@@ -1093,19 +1666,13 @@ if not filtered_df.empty:
     with summary_col1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🧠 Executive Summary")
-
-        for insight in generate_summary_insights(
-            filtered_df,
-            feature_df=filtered_feature_df,
-            pain_df=filtered_pain_df
-        ):
+        for insight in generate_summary_insights(filtered_df, filtered_feature_df, filtered_pain_df):
             st.markdown(f"""
             <div class="summary-box">
                 <div class="summary-title">Insight</div>
                 <div class="summary-body">{insight}</div>
             </div>
             """, unsafe_allow_html=True)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     with summary_col2:
@@ -1122,7 +1689,7 @@ if not filtered_df.empty:
         for chip in chips:
             st.markdown(f'<span class="insight-chip">{chip}</span>', unsafe_allow_html=True)
         st.markdown("<br><br>", unsafe_allow_html=True)
-        st.caption("Proxy metrics such as weighted reach and influence are model-derived signals, not platform-certified engagement.")
+        st.caption("Custom keywords stay in the filter list even when current extracted data has zero matches.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     tabs = st.tabs([
@@ -1131,22 +1698,20 @@ if not filtered_df.empty:
         "⚠️ Pain Point Radar",
         "🧭 Intent & Platform",
         "🏆 Source Influence",
+        "💬 Sentiment Explorer",
         "🗂️ Ground Truth",
+        "🌐 Discovery Pool",
+        "📰 Raw Articles",
         "🎥 Active Video Vault"
     ])
 
     with tabs[0]:
-        tc1, tc2 = st.columns(2)
-
-        with tc1:
+        tc1, tc2, tc3, tc4 = st.columns(2), st.columns(2), None, None
+        # first row
+        with tc1[0]:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Mentions Over Time")
-            trend_mentions = (
-                filtered_df.groupby("Day")
-                .size()
-                .reset_index(name="Mentions")
-                .sort_values("Day")
-            )
+            trend_mentions = filtered_df.groupby("Day").size().reset_index(name="Mentions").sort_values("Day")
             if not trend_mentions.empty:
                 fig = px.line(trend_mentions, x="Day", y="Mentions", markers=True)
                 fig.update_traces(line_width=3)
@@ -1163,15 +1728,10 @@ if not filtered_df.empty:
                 st.info("No time-series data available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        with tc2:
+        with tc1[1]:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Negative Share Over Time")
-            trend_sent = (
-                filtered_df.groupby(["Day", "Sentiment_Category"])
-                .size()
-                .reset_index(name="Count")
-            )
-
+            trend_sent = filtered_df.groupby(["Day", "Sentiment_Category"]).size().reset_index(name="Count")
             if not trend_sent.empty:
                 pivot = trend_sent.pivot(index="Day", columns="Sentiment_Category", values="Count").fillna(0)
                 pivot["Negative Share %"] = np.where(
@@ -1196,19 +1756,18 @@ if not filtered_df.empty:
                 st.info("No negative trend available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        tc3, tc4 = st.columns(2)
-
-        with tc3:
+        c3, c4 = st.columns(2)
+        with c3:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Fastest Growing Feature Themes")
             growth_df = compare_recent_vs_previous(filtered_feature_df, "Feature", recent_days=7)
             if not growth_df.empty:
-                st.dataframe(growth_df.head(12), use_container_width=True, height=360)
+                st.dataframe(safe_df_for_display(growth_df.head(20)), use_container_width=True, height=360)
             else:
                 st.info("Not enough dated data to compute growth.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        with tc4:
+        with c4:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Fastest Growing Pain Points")
             pain_growth_df = compare_recent_vs_previous(
@@ -1217,7 +1776,7 @@ if not filtered_df.empty:
                 recent_days=7
             )
             if not pain_growth_df.empty:
-                st.dataframe(pain_growth_df.head(12), use_container_width=True, height=360)
+                st.dataframe(safe_df_for_display(pain_growth_df.head(20)), use_container_width=True, height=360)
             else:
                 st.info("Not enough dated pain-point data to compute growth.")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1228,11 +1787,7 @@ if not filtered_df.empty:
         with fc1:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Topic Polarization Matrix")
-            topic_breakdown = (
-                filtered_feature_df.groupby(["Feature", "Sentiment_Category"])
-                .size()
-                .reset_index(name="Count")
-            )
+            topic_breakdown = filtered_feature_df.groupby(["Feature", "Sentiment_Category"]).size().reset_index(name="Count")
             if not topic_breakdown.empty:
                 fig_topic = px.bar(
                     topic_breakdown,
@@ -1291,8 +1846,8 @@ if not filtered_df.empty:
                     0
                 )
 
-                # Add custom features with zero rows if selected but unmatched
                 existing_features = set(feat_summary["Feature"].astype(str).tolist())
+                custom_features = [x.strip() for x in st.session_state["custom_feature_tags"] if x.strip()]
                 missing_custom = [f for f in custom_features if f in selected_feature and f not in existing_features]
                 if missing_custom:
                     zero_rows = pd.DataFrame({
@@ -1312,64 +1867,19 @@ if not filtered_df.empty:
                 feat_summary = feat_summary.sort_values(["Mentions", "Weighted_Reach"], ascending=[False, False])
 
                 st.dataframe(
-                    feat_summary[[
+                    safe_df_for_display(feat_summary[[
                         "Feature", "Mentions", "Positive %", "Negative %",
                         "Avg_Sentiment", "Weighted_Sentiment", "Weighted_Reach"
-                    ]],
+                    ]]),
                     use_container_width=True,
                     height=420
                 )
             else:
-                # Show zero rows for selected custom features
-                missing_custom = [f for f in custom_features if f in selected_feature]
-                if missing_custom:
-                    zero_rows = pd.DataFrame({
-                        "Feature": missing_custom,
-                        "Mentions": 0,
-                        "Positive %": 0.0,
-                        "Negative %": 0.0,
-                        "Avg_Sentiment": 0.0,
-                        "Weighted_Sentiment": 0.0,
-                        "Weighted_Reach": 0.0
-                    })
-                    st.dataframe(zero_rows, use_container_width=True, height=220)
-                else:
-                    st.info("No feature summary available.")
+                st.info("No feature summary available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown("### Feature Heatmap")
-        if not filtered_feature_df.empty:
-            heatmap_df = (
-                filtered_feature_df.groupby(["Feature", "Sentiment_Category"])
-                .size()
-                .reset_index(name="Count")
-            )
-            heat_pivot = heatmap_df.pivot(index="Feature", columns="Sentiment_Category", values="Count").fillna(0)
-            heat_pivot = heat_pivot.reindex(columns=["Positive", "Neutral", "Negative"], fill_value=0)
-
-            fig_heat = go.Figure(
-                data=go.Heatmap(
-                    z=heat_pivot.values,
-                    x=heat_pivot.columns,
-                    y=heat_pivot.index,
-                    colorscale="Blues",
-                    hovertemplate="Feature: %{y}<br>Sentiment: %{x}<br>Count: %{z}<extra></extra>"
-                )
-            )
-            fig_heat.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                font_color="#9CA3AF",
-                margin=dict(l=0, r=0, t=20, b=0)
-            )
-            st.plotly_chart(fig_heat, use_container_width=True)
-        else:
-            st.info("No heatmap data available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
     with tabs[2]:
-        pc1, pc2 = st.columns(2)
+        pc1, pc2, pc3 = st.columns([1, 1, 1])
 
         pain_neg = filtered_pain_df[
             (filtered_pain_df["Pain_Point"] != "None") &
@@ -1382,12 +1892,7 @@ if not filtered_df.empty:
             if not pain_neg.empty:
                 pain_counts = pain_neg["Pain_Point"].value_counts().reset_index()
                 pain_counts.columns = ["Pain_Point", "Count"]
-                fig_pain = px.bar(
-                    pain_counts.head(12),
-                    x="Count",
-                    y="Pain_Point",
-                    orientation="h"
-                )
+                fig_pain = px.bar(pain_counts.head(12), x="Count", y="Pain_Point", orientation="h")
                 fig_pain.update_layout(
                     plot_bgcolor="rgba(0,0,0,0)",
                     paper_bgcolor="rgba(0,0,0,0)",
@@ -1405,11 +1910,7 @@ if not filtered_df.empty:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Pain Point by Platform")
             if not pain_neg.empty:
-                pain_platform = (
-                    pain_neg.groupby(["Pain_Point", "Platform"])
-                    .size()
-                    .reset_index(name="Count")
-                )
+                pain_platform = pain_neg.groupby(["Pain_Point", "Platform"]).size().reset_index(name="Count")
                 fig = px.bar(
                     pain_platform,
                     x="Count",
@@ -1432,35 +1933,32 @@ if not filtered_df.empty:
                 st.info("No platform pain-point split available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown("### Pain Point Scorecard")
-        if not pain_neg.empty:
-            pain_scorecard = (
-                pain_neg.groupby("Pain_Point")
-                .agg(
-                    Negative_Mentions=("Pain_Point", "count"),
-                    Avg_Sentiment=("Sentiment_Score", "mean"),
-                    Weighted_Reach=("Influence_Score", "sum")
+        with pc3:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown("### Pain Point Scorecard")
+            if not pain_neg.empty:
+                pain_scorecard = (
+                    pain_neg.groupby("Pain_Point")
+                    .agg(
+                        Negative_Mentions=("Pain_Point", "count"),
+                        Avg_Sentiment=("Sentiment_Score", "mean"),
+                        Weighted_Reach=("Influence_Score", "sum")
+                    )
+                    .reset_index()
+                    .sort_values(["Negative_Mentions", "Weighted_Reach"], ascending=[False, False])
                 )
-                .reset_index()
-                .sort_values(["Negative_Mentions", "Weighted_Reach"], ascending=[False, False])
-            )
-            st.dataframe(pain_scorecard, use_container_width=True, height=380)
-        else:
-            st.info("No negative pain-point scorecard available.")
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.dataframe(safe_df_for_display(pain_scorecard), use_container_width=True, height=360)
+            else:
+                st.info("No negative pain-point scorecard available.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
     with tabs[3]:
-        ic1, ic2 = st.columns(2)
+        ic1, ic2, ic3 = st.columns([1, 1, 1])
 
         with ic1:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("### Platform Health Distribution")
-            platform_breakdown = (
-                filtered_df.groupby(["Platform", "Sentiment_Category"])
-                .size()
-                .reset_index(name="Count")
-            )
+            platform_breakdown = filtered_df.groupby(["Platform", "Sentiment_Category"]).size().reset_index(name="Count")
             if not platform_breakdown.empty:
                 fig_platform = px.bar(
                     platform_breakdown,
@@ -1490,7 +1988,6 @@ if not filtered_df.empty:
             if not filtered_intent_df.empty:
                 intent_counts = filtered_intent_df["Intent"].value_counts().reset_index()
                 intent_counts.columns = ["Intent", "Count"]
-
                 fig = px.bar(intent_counts, x="Count", y="Intent", orientation="h")
                 fig.update_layout(
                     plot_bgcolor="rgba(0,0,0,0)",
@@ -1505,24 +2002,19 @@ if not filtered_df.empty:
                 st.info("No intent data available.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown("### Intent × Sentiment Table")
-        if not filtered_intent_df.empty:
-            intent_sent = (
-                filtered_intent_df.groupby(["Intent", "Sentiment_Category"])
-                .size()
-                .unstack(fill_value=0)
-                .reset_index()
-            )
-            st.dataframe(intent_sent, use_container_width=True, height=360)
-        else:
-            st.info("No intent-sentiment matrix available.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        with ic3:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown("### Intent × Sentiment Table")
+            if not filtered_intent_df.empty:
+                intent_sent = filtered_intent_df.groupby(["Intent", "Sentiment_Category"]).size().unstack(fill_value=0).reset_index()
+                st.dataframe(safe_df_for_display(intent_sent), use_container_width=True, height=360)
+            else:
+                st.info("No intent-sentiment matrix available.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
     with tabs[4]:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### Source Influence Leaderboard")
-
         source_table = (
             filtered_df.groupby(["Author", "Platform", "Source_Tier"])
             .agg(
@@ -1535,47 +2027,141 @@ if not filtered_df.empty:
             .reset_index()
             .sort_values(["Weighted_Reach", "Mentions"], ascending=[False, False])
         )
-
-        st.dataframe(source_table, use_container_width=True, height=450)
+        st.dataframe(safe_df_for_display(source_table), use_container_width=True, height=450)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tabs[5]:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown("### 💬 Filtered Ground Truth Explorer")
+        st.markdown("### 💬 Sentiment Explorer")
 
+        explorer_df = filtered_df.copy()
+
+        explorer_feature = st.selectbox(
+            "Feature focus",
+            ["All"] + sorted(list(set(all_feature_options))),
+            index=0,
+            key="explorer_feature"
+        )
+
+        explorer_sentiment = st.selectbox(
+            "Sentiment focus",
+            ["All", "Positive", "Neutral", "Negative"],
+            index=0,
+            key="explorer_sentiment"
+        )
+
+        explorer_platform = st.selectbox(
+            "Platform focus",
+            ["All"] + sorted(explorer_df["Platform"].dropna().unique().tolist()),
+            index=0,
+            key="explorer_platform"
+        )
+
+        if explorer_feature != "All":
+            explorer_df = explorer_df[
+                explorer_df["Feature_List"].apply(
+                    lambda x: explorer_feature in x if isinstance(x, list) else False
+                )
+            ]
+
+        if explorer_sentiment != "All":
+            explorer_df = explorer_df[explorer_df["Sentiment_Category"] == explorer_sentiment]
+
+        if explorer_platform != "All":
+            explorer_df = explorer_df[explorer_df["Platform"] == explorer_platform]
+
+        explorer_df = explorer_df.sort_values(by="Date", ascending=False)
+
+        view_df = explorer_df[[
+            "Date", "Platform", "Author", "Title", "Video Title", "Sentiment_Category",
+            "Sentiment_Score", "Content", "URL"
+        ]].copy()
+
+        st.dataframe(safe_df_for_display(view_df), use_container_width=True, height=520)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[6]:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown("### 🗂️ Ground Truth Explorer")
         display_df = filtered_df.copy()
         display_df["Feature"] = display_df["Feature_List"].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
         display_df["Pain Point"] = display_df["Pain_Point_List"].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
         display_df["Intent"] = display_df["Intent_List"].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
         display_df["Date_Display"] = display_df["Date_Local"].dt.strftime("%Y-%m-%d %H:%M") if "Date_Local" in display_df.columns else display_df["Date"]
 
-        search_term = st.text_input("Search in content", placeholder="Try words like battery, heating, overpriced, 10-bit...")
+        search_term = st.text_input("Search in content", placeholder="Try words like battery, heating, 10-bit, banding...", key="ground_truth_search")
         if search_term:
-            display_df = display_df[
-                display_df["Content"].str.contains(search_term, case=False, na=False)
-            ]
+            display_df = display_df[display_df["Content"].str.contains(search_term, case=False, na=False)]
 
         display_df = display_df.sort_values(by="Date", ascending=False)
 
-        def color_sentiment(val):
-            return f"color: {PREMIUM_COLORS.get(val, '#9CA3AF')}; font-weight: 600;"
-
         st.dataframe(
-            display_df[[
-                "Date_Display", "Platform", "Author", "Feature", "Pain Point",
-                "Intent", "Sentiment_Category", "Sentiment_Score",
-                "Influence_Score", "Content"
-            ]].style.map(color_sentiment, subset=["Sentiment_Category"]),
+            safe_df_for_display(display_df[[
+                "Date_Display", "Platform", "Author", "Title", "Video Title", "Feature", "Pain Point",
+                "Intent", "Sentiment_Category", "Sentiment_Score", "Influence_Score", "Content", "URL"
+            ]]),
             use_container_width=True,
             height=520
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with tabs[6]:
+    with tabs[7]:
+        discovered_df = st.session_state.get("discovered_urls_df", pd.DataFrame())
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown("### 🌐 Discovery URL Pool")
+        if not discovered_df.empty:
+            by_source = discovered_df["Discovery_Source"].value_counts().reset_index()
+            by_source.columns = ["Discovery_Source", "Count"]
+            fig = px.bar(by_source, x="Count", y="Discovery_Source", orientation="h")
+            fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font_color="#9CA3AF",
+                margin=dict(l=0, r=0, t=20, b=0),
+                xaxis=dict(showgrid=True, gridcolor="#1F2937"),
+                yaxis=dict(showgrid=False)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(safe_df_for_display(discovered_df.head(200)), use_container_width=True, height=420)
+        else:
+            st.info("No discovery data available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[8]:
+        raw_news_df = st.session_state["raw_news_data"].copy()
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown("### 📰 Raw Extracted Articles")
+        if not raw_news_df.empty:
+            src_df = raw_news_df["Source"].value_counts().reset_index()
+            src_df.columns = ["Source", "Count"]
+            fig_src = px.bar(src_df.head(20), x="Count", y="Source", orientation="h")
+            fig_src.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font_color="#9CA3AF",
+                margin=dict(l=0, r=0, t=20, b=0),
+                xaxis=dict(showgrid=True, gridcolor="#1F2937"),
+                yaxis=dict(showgrid=False)
+            )
+            st.plotly_chart(fig_src, use_container_width=True)
+
+            with st.expander(f"View extracted articles ({len(raw_news_df)})", expanded=False):
+                for _, row in raw_news_df.head(30).iterrows():
+                    st.markdown(f"**{row.get('Title', 'Untitled')}**")
+                    st.caption(f"{row.get('Source', 'Unknown')} • {row.get('Discovery_Source', '')}")
+                    st.write(str(row.get("Content", ""))[:450] + "...")
+                    if row.get("URL"):
+                        st.markdown(f"[Open Article]({row['URL']})")
+                    st.divider()
+        else:
+            st.info("No raw article data available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[9]:
         if "sources_db" in st.session_state and not st.session_state["sources_db"].empty:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown(f"### 📂 Active Video Vault ({len(st.session_state['sources_db'])} videos tracked)")
-            st.dataframe(st.session_state["sources_db"], use_container_width=True, height=480)
+            st.dataframe(safe_df_for_display(st.session_state["sources_db"]), use_container_width=True, height=480)
             st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("No tracked YouTube source vault yet. Enable YouTube scraping and run the pipeline.")
